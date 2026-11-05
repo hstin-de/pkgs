@@ -1,0 +1,9 @@
+/*/updates/*
+  Cache-Control: no-cache
+/apt/dists/*
+  Cache-Control: no-cache
+/rpm/*
+  Cache-Control: no-cache
+/*/install.sh
+  Cache-Control: no-cache
+  Content-Type: text/plain; charset=utf-8

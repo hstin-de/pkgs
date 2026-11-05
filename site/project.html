@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@PROJECT@ downloads</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; padding: 0 1rem; color: #1f2933; }
+  code, pre { font: 14px ui-monospace, monospace; background: #f1f3f5; border-radius: 6px; }
+  pre { padding: .75rem 1rem; overflow-x: auto; }
+  h2 { margin-top: 2rem; font-size: 1.1rem; }
+  li { margin: .25rem 0; }
+</style>
+<h1>@PROJECT@</h1>
+<h2>Linux</h2>
+<pre>curl -fsSL @BASE@/@PROJECT@/install.sh | sudo sh</pre>
+<h2>Latest release: @LATEST@</h2>
+<ul>
+@FILES@
+</ul>
+<p><a href="@BASE@/">All projects</a></p>
+</html>

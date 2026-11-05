@@ -1,0 +1,72 @@
+name: publish
+
+# Called by a project's workflow to publish on pkgs.hstin.de (README):
+#
+#   jobs:
+#     pkgs:
+#       uses: hstin-de/pkgs/.github/workflows/publish.yml@main
+#       with: { project: NAME, tag: v1.2.3, artifact: pkgs }
+#       secrets: inherit
+#
+# The artifact (uploaded earlier in the same run) holds files/ (the release's
+# files, with tag) and/or updates/ (signed update metadata). The files go to
+# dl.hstin.de/NAME/<tag>/, the lists and metadata into this repository, whose
+# push deploys the site.
+on:
+  workflow_call:
+    inputs:
+      project:
+        required: true
+        type: string
+      tag:
+        description: Release tag; empty to publish only update metadata
+        type: string
+        default: ""
+      artifact:
+        required: true
+        type: string
+      keep:
+        description: Releases kept on dl.hstin.de
+        type: number
+        default: 8
+    secrets:
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      PKGS_DEPLOY_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pkgs-publish-${{ inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}
+          path: in
+      - uses: actions/checkout@v7
+        with:
+          repository: hstin-de/pkgs
+          ssh-key: ${{ secrets.PKGS_DEPLOY_KEY }}
+          path: pkgs
+      - name: Publish
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          KEEP: ${{ inputs.keep }}
+          PROJECT: ${{ inputs.project }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$TAG" ]; then pkgs/scripts/publish.sh "$PROJECT" "$TAG" in; else pkgs/scripts/publish.sh "$PROJECT" in; fi

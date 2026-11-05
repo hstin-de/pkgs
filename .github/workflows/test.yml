@@ -1,0 +1,30 @@
+name: test
+
+# The site generator and publish script against real apt and dnf in
+# containers (e2e/), and shellcheck.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - scripts/**
+      - site/**
+      - e2e/**
+      - go.mod
+      - .github/workflows/test.yml
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: shellcheck scripts/*.sh site/install.sh
+      - run: go test -count=1 -v ./e2e/

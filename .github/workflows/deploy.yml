@@ -1,0 +1,58 @@
+name: deploy
+
+# Builds pkgs.hstin.de (scripts/build.sh) and deploys it to Cloudflare Pages
+# whenever a project published (publish.yml commits into projects/) or the
+# site changed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - projects.txt
+      - projects/**
+      - scripts/build.sh
+      - site/**
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    env:
+      PKGS: https://pkgs.hstin.de
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/hstin-pkgs
+          key: hstin-pkgs-${{ github.run_id }}
+          restore-keys: hstin-pkgs-
+      - name: Site
+        env:
+          REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY }}
+          REPO_GPG_FINGERPRINT: ${{ secrets.REPO_GPG_FINGERPRINT }}
+        run: |
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          echo "$REPO_GPG_KEY" | gpg --batch --import
+          REPO_KEY="$REPO_GPG_FINGERPRINT" scripts/build.sh out
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy out --project-name=hstin-pkgs --branch=main --commit-dirty=true
+      - name: Check the published site
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            if curl -fsS "$PKGS/apt/dists/stable/InRelease" | grep -q "Components:"; then exit 0; fi
+            sleep 10
+          done
+          exit 1
