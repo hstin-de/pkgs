@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publishes a project's release on pkgs.hstin.de: uploads its files to
-# dl.hstin.de (Cloudflare R2), records the file list, drops the oldest
+# the R2 bucket (served at pkgs.hstin.de/dl/), records the file list, drops the oldest
 # releases beyond KEEP from both, takes over its signed update metadata, and
 # commits and pushes this repository (which deploys the site).
 #

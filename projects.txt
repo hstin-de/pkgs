@@ -1,8 +1,9 @@
-# Projects on pkgs.hstin.de, one name per line. A name is the apt component,
-# the dnf repository (rpm/NAME/), the project's pages (NAME/, NAME/install.sh)
-# and its signed update metadata (NAME/updates/, if it publishes any).
+# Projects on pkgs.hstin.de, one name per line. All their packages are in the
+# one apt and dnf repository; a name is the project's download page (NAME/),
+# its signed update metadata (NAME/updates/, if it publishes any) and its
+# place in the R2 bucket.
 #
 # Projects publish with .github/workflows/publish.yml: their release files go
-# to dl.hstin.de/NAME/<tag>/ (Cloudflare R2), the file lists to
+# to the R2 bucket as NAME/<tag>/ (served at /dl/NAME/<tag>/), the file lists to
 # projects/NAME/releases/<tag>.txt and update metadata to projects/NAME/updates/.
 otterlink

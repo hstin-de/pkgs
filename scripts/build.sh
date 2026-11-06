@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
-# Builds the static site of pkgs.hstin.de for every project in projects.txt:
-# one signed apt repository with a component per project, a signed dnf
-# repository per project, a download page and an install script per project,
-# the projects' signed update metadata, and the keys. The packages themselves
-# are on dl.hstin.de (Cloudflare R2, put there by publish.sh): the site only
-# redirects to them (Cloudflare Pages takes files up to 25 MiB).
+# Builds the static part of pkgs.hstin.de: one signed apt repository (suite
+# stable, component main) and one signed dnf repository with the packages of
+# every project in projects.txt, the package hstin-repo that sets both up, the
+# install script, a download page per project, the projects' signed update
+# metadata, and the keys. The release files stay in the R2 bucket; functions/
+# serves them under /apt/pool/, /rpm/pool/ and /dl/ (Pages takes static files
+# up to 25 MiB).
 #
-#   scripts/build.sh SITE
+#   scripts/build.sh OUT
 #
 # Environment:
 #   REPO_KEY   OpenPGP key id or fingerprint of the repository key in GNUPGHOME (required)
-#   RELEASES   how many releases per project the repositories hold (default 5)
-#   DL_URL     where the files are, as <project>/<tag>/<file> (default https://dl.hstin.de)
-#   PKGS_URL   the site's own URL in the repository files (default https://pkgs.hstin.de)
+#   R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, R2_BUCKET (default hstin-dl):
+#              fetch the packages from R2; without R2_ENDPOINT from DL_URL/<project>/<tag>/<file>
+#   PKGS_URL   the site's own URL (default https://pkgs.hstin.de)
 #   ROOT       the repository with projects.txt and projects/ (default this script's)
 #   CACHE      downloaded packages (default ~/.cache/hstin-pkgs)
-# Needs apt-ftparchive (apt-utils), createrepo_c, rpmkeys (rpm), gpg, curl.
+# Needs apt-ftparchive (apt-utils), createrepo_c, rpmkeys (rpm), gpg, nfpm, and curl or aws.
 set -euo pipefail
 
-site=${1:?usage: build.sh SITE}
+out=${1:?usage: build.sh OUT}
 : "${REPO_KEY:?REPO_KEY is not set}"
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=${ROOT:-$here}
-releases=${RELEASES:-5}
-dl=${DL_URL:-https://dl.hstin.de}
 base=${PKGS_URL:-https://pkgs.hstin.de}
 cache=${CACHE:-$HOME/.cache/hstin-pkgs}
-for t in apt-ftparchive createrepo_c rpmkeys gpg curl; do
+bucket=${R2_BUCKET:-hstin-dl}
+for t in apt-ftparchive createrepo_c rpmkeys gpg nfpm; do
 	command -v "$t" > /dev/null || {
 		echo "build.sh: $t not found" >&2
 		exit 1
 	}
 done
+case "$(realpath -m "$out")" in "$here" | "$here"/site | "$here"/scripts | "$here"/projects | "$here"/functions | "$here"/src | /)
+	echo "build.sh: $out is not an output directory" >&2
+	exit 2
+	;;
+esac
 
 mapfile -t names < <(grep -Ev '^[[:space:]]*(#|$)' "$root/projects.txt" | awk '{print $1}')
 [ "${#names[@]}" -gt 0 ] || {
@@ -39,149 +44,159 @@ mapfile -t names < <(grep -Ev '^[[:space:]]*(#|$)' "$root/projects.txt" | awk '{
 	exit 1
 }
 
-case "$(realpath -m "$site")" in "$here" | "$here/site" | "$here/scripts" | "$here/projects" | /)
-	echo "build.sh: $site is not an output directory" >&2
-	exit 2
-	;;
-esac
-rm -rf "$site"
-mkdir -p "$site"/{keys,apt}
-gpg --batch --armor --export "$REPO_KEY" > "$site/keys/hstin.asc"
-gpg --batch --export "$REPO_KEY" > "$site/keys/hstin.gpg"
-[ -s "$site/keys/hstin.gpg" ] || {
+rm -rf "$out"
+mkdir -p "$out"/{keys,apt/pool,apt/repo,rpm/pool,rpm/repo}
+gpg --batch --armor --export "$REPO_KEY" > "$out/keys/hstin.asc"
+gpg --batch --export "$REPO_KEY" > "$out/keys/hstin.gpg"
+[ -s "$out/keys/hstin.gpg" ] || {
 	echo "build.sh: key $REPO_KEY not in GNUPGHOME" >&2
 	exit 1
 }
-rpmdb=$(mktemp -d)
-trap 'rm -rf "$rpmdb"' EXIT
-rpmkeys --dbpath "$rpmdb" --import "$site/keys/hstin.asc"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+rpmkeys --dbpath "$work/rpmdb" --import "$out/keys/hstin.asc"
+gpg --batch --armor --export-secret-keys "$REPO_KEY" > "$work/key.asc"
 sign() { gpg --batch --yes --local-user "$REPO_KEY" "$@"; }
-esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-redirects="$site/_redirects"
-: > "$redirects"
+fetch() { # project tag file → cached path
+	local f="$cache/$1/$2/$3"
+	if [ ! -s "$f" ]; then
+		mkdir -p "$(dirname "$f")"
+		if [ -n "${R2_ENDPOINT:-}" ]; then
+			aws s3 cp "s3://$bucket/$1/$2/$3" "$f.tmp" --endpoint-url "$R2_ENDPOINT" --only-show-errors
+		else
+			curl -fsSL --retry 3 -o "$f.tmp" "${DL_URL:?DL_URL or R2_ENDPOINT is not set}/$1/$2/$3"
+		fi
+		mv "$f.tmp" "$f"
+	fi
+	echo "$f"
+}
+
+# hstin-repo: the apt source and dnf repository with the key, so that a new
+# URL or key arrives as an update (bump repo/VERSION).
+repo_version=$(tr -d '[:space:]' < "$here/repo/VERSION")
+cp "$out/keys/hstin.gpg" "$out/keys/hstin.asc" "$work/"
+sed "s|@BASE@|$base|g" "$here/repo/hstin.sources" > "$work/hstin.sources"
+sed "s|@BASE@|$base|g" "$here/repo/hstin.repo" > "$work/hstin.repo"
+for format in deb rpm; do
+	if [ "$format" = deb ]; then
+		files="  - {src: $work/hstin.sources, dst: /etc/apt/sources.list.d/hstin.sources, type: config|noreplace, file_info: {mode: 0644}}
+  - {src: $work/hstin.gpg, dst: /usr/share/keyrings/hstin.gpg, file_info: {mode: 0644}}"
+		target="$out/apt/repo/hstin-repo_${repo_version}_all.deb"
+	else
+		files="  - {src: $work/hstin.repo, dst: /etc/yum.repos.d/hstin.repo, type: config|noreplace, file_info: {mode: 0644}}
+  - {src: $work/hstin.asc, dst: /etc/pki/rpm-gpg/RPM-GPG-KEY-hstin, file_info: {mode: 0644}}"
+		target="$out/rpm/repo/hstin-repo-${repo_version}-1.noarch.rpm"
+	fi
+	cat > "$work/hstin-repo-$format.yaml" << YAML
+name: hstin-repo
+arch: all
+platform: linux
+version: "$repo_version"
+release: "1"
+maintainer: hstin <pkgs@hstin.de>
+description: The hstin package repository ($base) and its signing key.
+homepage: $base
+license: Apache-2.0
+contents:
+$files
+rpm:
+  signature:
+    key_file: $work/key.asc
+YAML
+	nfpm package -f "$work/hstin-repo-$format.yaml" -p "$format" -t "$target" > /dev/null
+done
+cp "$out/apt/repo/hstin-repo_${repo_version}_all.deb" "$out/hstin-repo.deb"
+cp "$out/rpm/repo/hstin-repo-${repo_version}-1.noarch.rpm" "$out/hstin-repo.rpm"
+
 summary=()
 list=""
-
 for name in "${names[@]}"; do
 	[[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
 		echo "build.sh: bad project name $name" >&2
 		exit 1
 	}
 	rel="$root/projects/$name/releases"
-	mapfile -t all < <(find "$rel" -maxdepth 1 -name 'v*.txt' -printf '%f\n' 2> /dev/null | sed 's/\.txt$//' | sort -V)
-	start=$((${#all[@]} > releases ? ${#all[@]} - releases : 0))
-	tags=("${all[@]:start}")
+	mapfile -t tags < <(find "$rel" -maxdepth 1 -name 'v*.txt' -printf '%f\n' 2> /dev/null | sed 's/\.txt$//' | sort -V)
 	for tag in "${tags[@]}"; do
 		while read -r f; do
 			case "$f" in *_linux_*.deb | *_linux_*.rpm) ;; *) continue ;; esac
-			[[ "$f" =~ ^[A-Za-z0-9._+-]+$ ]] || continue
-			local_file="$cache/$name/$tag/$f"
-			if [ ! -s "$local_file" ]; then
-				mkdir -p "$(dirname "$local_file")"
-				curl -fsSL --retry 3 -o "$local_file.tmp" "$dl/$name/$tag/$f"
-				mv "$local_file.tmp" "$local_file"
-			fi
+			[[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+			local_file=$(fetch "$name" "$tag" "$f")
 			if [[ "$f" == *.deb ]]; then
-				mkdir -p "$site/apt/pool/$name/$tag"
-				cp "$local_file" "$site/apt/pool/$name/$tag/"
-				echo "/apt/pool/$name/$tag/$f $dl/$name/$tag/$f 302" >> "$redirects"
-			elif rpmkeys --dbpath "$rpmdb" --checksig "$local_file" | grep -q 'signatures OK'; then
-				mkdir -p "$site/rpm/$name/pool/$tag"
-				cp "$local_file" "$site/rpm/$name/pool/$tag/"
-				echo "/rpm/$name/pool/$tag/$f $dl/$name/$tag/$f 302" >> "$redirects"
+				mkdir -p "$out/apt/pool/$name/$tag"
+				cp "$local_file" "$out/apt/pool/$name/$tag/"
+			elif rpmkeys --dbpath "$work/rpmdb" --checksig "$local_file" | grep -q 'signatures OK'; then
+				mkdir -p "$out/rpm/pool/$name/$tag"
+				cp "$local_file" "$out/rpm/pool/$name/$tag/"
 			else
-				echo "build.sh: $name $f is not signed with the repository key; left out" >&2
+				echo "build.sh: $name $f is not signed with the repository key; left out of dnf" >&2
 			fi
 		done < "$rel/$tag.txt"
 	done
 
-	# apt: the project's component.
-	for arch in amd64 arm64; do
-		d="$site/apt/dists/stable/$name/binary-$arch"
-		mkdir -p "$d"
-		if [ -d "$site/apt/pool/$name" ]; then
-			(cd "$site/apt" && apt-ftparchive --arch "$arch" packages "pool/$name") > "$d/Packages"
-		else
-			: > "$d/Packages"
-		fi
-		gzip -9nkf "$d/Packages"
-	done
-	cat > "$site/apt/$name.sources" << SRC
-Types: deb
-URIs: $base/apt
-Suites: stable
-Components: $name
-Signed-By: /usr/share/keyrings/hstin.gpg
-SRC
-
-	# rpm: the project's repository.
-	mkdir -p "$site/rpm/$name"
-	createrepo_c --quiet --general-compress-type=gz "$site/rpm/$name" > /dev/null
-	sign --armor --detach-sign -o "$site/rpm/$name/repodata/repomd.xml.asc" "$site/rpm/$name/repodata/repomd.xml"
-	cat > "$site/rpm/$name/$name.repo" << REPO
-[hstin-$name]
-name=$name (pkgs.hstin.de)
-baseurl=$base/rpm/$name
-enabled=1
-gpgcheck=1
-repo_gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-hstin
-REPO
-
-	# The project's pages and update metadata.
-	mkdir -p "$site/$name"
-	sed -e "s|@PROJECT@|$name|g" -e "s|@BASE@|$base|g" "$here/site/install.sh" > "$site/$name/install.sh"
+	# The project's download page and update metadata.
+	mkdir -p "$out/$name"
 	files=""
 	latest=""
-	if [ "${#all[@]}" -gt 0 ]; then
-		latest=${all[-1]}
+	if [ "${#tags[@]}" -gt 0 ]; then
+		latest=${tags[-1]}
 		while read -r f; do
-			[[ "$f" =~ ^[A-Za-z0-9._+-]+$ ]] || continue
-			files+="<li><a href=\"$dl/$name/$latest/$f\">$f</a></li>"$'\n'
+			[[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+			files+="<li><a href=\"$base/dl/$name/$latest/$f\">$f</a></li>"$'\n'
 		done < "$rel/$latest.txt"
 	fi
 	awk -v files="$files" '{ if ($0 == "@FILES@") printf "%s", files; else print }' "$here/site/project.html" |
-		sed -e "s|@PROJECT@|$name|g" -e "s|@BASE@|$base|g" -e "s|@LATEST@|${latest:-none yet}|g" > "$site/$name/index.html"
+		sed -e "s|@PROJECT@|$name|g" -e "s|@BASE@|$base|g" -e "s|@LATEST@|${latest:-none yet}|g" > "$out/$name/index.html"
 	if [ -s "$root/projects/$name/updates/keys.json" ]; then
-		mkdir -p "$site/$name/updates"
+		mkdir -p "$out/$name/updates"
 		for f in "$root/projects/$name/updates/"*.json; do
 			[ -s "$f.sig" ] || {
 				echo "build.sh: $f has no signature" >&2
 				exit 1
 			}
-			cp "$f" "$f.sig" "$site/$name/updates/"
+			cp "$f" "$f.sig" "$out/$name/updates/"
 		done
 	fi
-	list+="<li><a href=\"$name/\"><b>$name</b></a> $(echo "${latest:-}" | esc): <code>curl -fsSL $base/$name/install.sh | sudo sh</code></li>"$'\n'
-	summary+=("$name: ${#tags[@]} of ${#all[@]} releases in the repositories (${tags[*]:-})")
+	list+="<li><a href=\"$name/\"><b>$name</b></a> ${latest:-}</li>"$'\n'
+	summary+=("$name: ${#tags[@]} releases (${tags[*]:-})")
 done
 
-# apt: one suite for every component.
+# apt: suite stable, component main.
 (
-	cd "$site/apt"
+	cd "$out/apt"
+	for arch in amd64 arm64; do
+		d=dists/stable/main/binary-$arch
+		mkdir -p "$d"
+		{
+			apt-ftparchive --arch "$arch" packages pool
+			apt-ftparchive --arch "$arch" packages repo
+		} > "$d/Packages"
+		gzip -9nkf "$d/Packages"
+	done
 	apt-ftparchive \
 		-o APT::FTPArchive::Release::Origin=hstin -o APT::FTPArchive::Release::Label=hstin \
 		-o APT::FTPArchive::Release::Suite=stable -o APT::FTPArchive::Release::Codename=stable \
-		-o APT::FTPArchive::Release::Architectures="amd64 arm64" \
-		-o APT::FTPArchive::Release::Components="${names[*]}" \
-		release dists/stable > Release.tmp
-	mv Release.tmp dists/stable/Release
+		-o APT::FTPArchive::Release::Architectures="amd64 arm64" -o APT::FTPArchive::Release::Components=main \
+		release dists/stable > "$work/Release"
+	mv "$work/Release" dists/stable/Release
 	sign --clearsign -o dists/stable/InRelease dists/stable/Release
 	sign --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
 )
-rm -rf "$site/apt/pool"
-find "$site/rpm" -mindepth 2 -maxdepth 2 -type d -name pool -exec rm -rf {} +
 
-lines=$(wc -l < "$redirects")
-[ "$lines" -le 2000 ] || {
-	echo "build.sh: $lines redirects, Pages allows 2000" >&2
-	exit 1
-}
+# rpm: one repository.
+createrepo_c --quiet --general-compress-type=gz "$out/rpm" > /dev/null
+sign --armor --detach-sign -o "$out/rpm/repodata/repomd.xml.asc" "$out/rpm/repodata/repomd.xml"
 
+# The release files are served from R2, not from here.
+rm -rf "$out/apt/pool" "$out/rpm/pool"
+
+sed "s|@BASE@|$base|g" "$here/site/install.sh" > "$out/install.sh"
+fpr=$(gpg --batch --with-colons --fingerprint "$REPO_KEY" 2> /dev/null | awk -F: '/^fpr/ {print $10; exit}')
 awk -v list="$list" '{ if ($0 == "@PROJECTS@") printf "%s", list; else print }' "$here/site/index.html" |
-	sed "s|@BASE@|$base|g" > "$site/index.html"
-cp "$here/site/_headers" "$site/"
+	sed -e "s|@BASE@|$base|g" -e "s|@FINGERPRINT@|$fpr|g" > "$out/index.html"
+sed "s|@BASE@|$base|g" "$here/repo/hstin.repo" > "$out/rpm/hstin.repo"
+cp "$here/site/_headers" "$out/"
 
 printf '%s\n' "${summary[@]}"
-echo "site: ${#names[@]} projects, $lines package redirects"
+echo "site: ${#names[@]} projects, hstin-repo $repo_version"

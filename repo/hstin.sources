@@ -1,0 +1,6 @@
+# The hstin package repository (package hstin-repo, @BASE@).
+Types: deb
+URIs: @BASE@/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/hstin.gpg

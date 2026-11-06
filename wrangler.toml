@@ -1,0 +1,9 @@
+# The Pages project of pkgs.hstin.de (direct upload: .github/workflows/deploy.yml).
+name = "hstin-pkgs"
+pages_build_output_dir = "out"
+compatibility_date = "2026-11-01"
+
+# The release files (publish.sh uploads them), private: functions/ serves them.
+[[r2_buckets]]
+binding = "DL"
+bucket_name = "hstin-dl"

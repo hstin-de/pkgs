@@ -58,7 +58,7 @@ cloudflare() {
 	put CLOUDFLARE_API_TOKEN "$v"
 	read -rp "Account ID: " v
 	put CLOUDFLARE_ACCOUNT_ID "$v"
-	read -rp "R2 token Access Key ID (Object Read & Write on hstin-dl): " v
+	read -rp "R2 token Access Key ID (Object Read & Write on the bucket hstin-dl): " v
 	put R2_ACCESS_KEY_ID "$v"
 	read -rsp "R2 token Secret Access Key: " v
 	echo

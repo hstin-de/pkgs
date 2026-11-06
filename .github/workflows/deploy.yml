@@ -1,8 +1,8 @@
 name: deploy
 
 # Builds pkgs.hstin.de (scripts/build.sh) and deploys it to Cloudflare Pages
-# whenever a project published (publish.yml commits into projects/) or the
-# site changed.
+# with its functions (the release files from R2) whenever a project published
+# (publish.yml commits into projects/) or the site changed.
 on:
   push:
     branches: [main]
@@ -11,6 +11,10 @@ on:
       - projects/**
       - scripts/build.sh
       - site/**
+      - repo/**
+      - functions/**
+      - src/**
+      - wrangler.toml
       - .github/workflows/deploy.yml
   workflow_dispatch:
 
@@ -29,7 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz | sudo tar -xz -C /usr/local/bin nfpm
       - uses: actions/cache@v6
         with:
           path: ~/.cache/hstin-pkgs
@@ -39,6 +45,10 @@ jobs:
         env:
           REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY }}
           REPO_GPG_FINGERPRINT: ${{ secrets.REPO_GPG_FINGERPRINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
           GNUPGHOME=$(mktemp -d)
           export GNUPGHOME
@@ -48,11 +58,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy out --project-name=hstin-pkgs --branch=main --commit-dirty=true
+          wranglerVersion: "4.158.0"
+          # wrangler.toml: the project, the output directory and the R2 binding.
+          command: pages deploy --branch=main --commit-dirty=true
       - name: Check the published site
         run: |
           for _ in 1 2 3 4 5 6; do
-            if curl -fsS "$PKGS/apt/dists/stable/InRelease" | grep -q "Components:"; then exit 0; fi
+            scripts/check.sh "$PKGS" && exit 0
             sleep 10
           done
           exit 1

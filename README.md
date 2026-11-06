@@ -1,28 +1,44 @@
 # pkgs.hstin.de
 
-Signed apt and dnf repositories, download pages and update metadata for the projects of hstin.
-
-- **pkgs.hstin.de** (Cloudflare Pages): repository metadata, install scripts, pages, keys, and each project's signed
-  update metadata (`NAME/updates/`). Built by `scripts/build.sh`, deployed by `.github/workflows/deploy.yml`.
-- **dl.hstin.de** (Cloudflare R2, bucket `hstin-dl`): the release files, as `NAME/<tag>/<file>`. Pages redirects the
-  repositories' package paths there (Pages takes files up to 25 MiB). The last 8 releases per project are kept.
+One signed apt and dnf repository with the packages of the projects of hstin, their download pages and their signed
+update metadata.
 
 ## Using it
 
 ```sh
-curl -fsSL https://pkgs.hstin.de/otterlink/install.sh | sudo sh
+# Debian, Ubuntu
+curl -fsSLo /tmp/hstin-repo.deb https://pkgs.hstin.de/hstin-repo.deb
+sudo apt install /tmp/hstin-repo.deb && sudo apt update
+sudo apt install otterlink
+
+# Fedora, RHEL
+sudo dnf install https://pkgs.hstin.de/hstin-repo.rpm
+sudo dnf install otterlink
+
+# or the script (it installs hstin-repo, then the packages named)
+curl -fsSLO https://pkgs.hstin.de/install.sh && less install.sh && sudo sh install.sh otterlink
 ```
 
-apt has one component per project (`deb https://pkgs.hstin.de/apt stable NAME`, key `keys/hstin.gpg`), dnf one
-repository per project (`rpm/NAME/NAME.repo`, key `keys/hstin.asc`).
+`hstin-repo` holds the apt source (`deb https://pkgs.hstin.de/apt stable main`) or dnf repository and the key, so a
+change of either arrives as an update. The start page shows the key's fingerprint and the steps by hand.
+
+## How it works
+
+- **Cloudflare Pages** (project `hstin-pkgs`, custom domain `pkgs.hstin.de`): the repository metadata, `hstin-repo`,
+  the install script, a download page per project (`NAME/`), the projects' update metadata (`NAME/updates/`) and the
+  keys, built by `scripts/build.sh` and deployed by `.github/workflows/deploy.yml`.
+- **Cloudflare R2** (bucket `hstin-dl`, private): the release files as `NAME/<tag>/<file>`, the last 8 releases per
+  project. The Pages functions (`functions/`, `src/dl.js`) serve them under `/apt/pool/`, `/rpm/pool/` and `/dl/`
+  (ranges and conditional requests included). Pages takes static files only up to 25 MiB.
+- Package names are one namespace across projects. rpm packages must be signed with the repository key; unsigned ones
+  stay out of the dnf repository.
+- Function requests count against the Workers plan (Free: 100,000 a day); everything else is static.
 
 ## Adding a project
 
 1. Add its name to `projects.txt`.
 2. `scripts/secrets.sh deploy-key NAME`, then `scripts/secrets.sh set` (the organization secrets now include it).
-3. Sign its rpm packages with the repository key (`REPO_GPG_KEY`; unsigned rpm packages stay out of the dnf
-   repository) and, if it likes, ship `keys/hstin.gpg` and its `apt/NAME.sources` / `rpm/NAME/NAME.repo` in its
-   packages, so later changes of either arrive with updates.
+3. Sign its rpm packages with the repository key (organization secret `REPO_GPG_KEY`).
 4. Publish from its release workflow: upload an artifact with `files/` (the release's files) and/or `updates/`
    (signed `*.json` + `*.json.sig`), then
 
@@ -34,18 +50,31 @@ repository per project (`rpm/NAME/NAME.repo`, key `keys/hstin.asc`).
      secrets: inherit
    ```
 
+   The files go to R2, the file list and metadata into `projects/NAME/`; that push deploys the site.
+
 ## Setup (once)
 
+In Cloudflare:
+
+1. R2: a bucket `hstin-dl` (no public access), and under *Manage API tokens* a token with *Object Read & Write* on it.
+2. Pages: a project `hstin-pkgs` (*Direct Upload*), custom domain `pkgs.hstin.de`. The R2 binding comes from
+   `wrangler.toml` with each deploy.
+3. An API token with *Account → Cloudflare Pages → Edit*, and the account ID.
+
+Then:
+
 ```sh
-scripts/secrets.sh repo-gpg       # the repository key
-scripts/secrets.sh cloudflare     # Pages token, account ID, R2 token
+scripts/secrets.sh repo-gpg       # the repository key (back up ~/hstin-pkgs-secrets)
+scripts/secrets.sh cloudflare     # the tokens and the account ID
+scripts/secrets.sh deploy-key otterlink
 scripts/secrets.sh set
+gh workflow run deploy --repo hstin-de/pkgs
 ```
 
-In Cloudflare: an R2 bucket `hstin-dl` with the custom domain `dl.hstin.de`, and a Pages project `hstin-pkgs` (direct
-upload) with the custom domain `pkgs.hstin.de`.
+Bump `repo/VERSION` when the key or the URL of the repository changes: installed machines get the new `hstin-repo`.
 
 ## Tests
 
-`go test -count=1 -v ./e2e/` builds a site from signed test packages of two projects and installs from it with apt and
-dnf in Debian and Fedora containers (Docker).
+`bun test src/` checks the function. `go test -count=1 -v ./e2e/` publishes signed test packages of two projects into
+a local R2 bucket, builds the site, serves it with `wrangler pages dev`, and installs from it with `hstin-repo`, the
+install script, apt and dnf in Debian and Fedora containers (Docker).

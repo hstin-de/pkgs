@@ -10,7 +10,7 @@ name: publish
 #
 # The artifact (uploaded earlier in the same run) holds files/ (the release's
 # files, with tag) and/or updates/ (signed update metadata). The files go to
-# dl.hstin.de/NAME/<tag>/, the lists and metadata into this repository, whose
+# the R2 bucket (pkgs.hstin.de/dl/NAME/<tag>/), the lists and metadata into this repository, whose
 # push deploys the site.
 on:
   workflow_call:
@@ -26,7 +26,7 @@ on:
         required: true
         type: string
       keep:
-        description: Releases kept on dl.hstin.de
+        description: Releases kept in the R2 bucket
         type: number
         default: 8
     secrets:

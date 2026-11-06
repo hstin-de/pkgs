@@ -12,28 +12,39 @@
   li { margin: .4rem 0; }
 </style>
 <h1>hstin packages</h1>
-<p>Signed apt and dnf repositories of the projects of <a href="https://github.com/hstin-de">hstin</a>. The packages
-themselves are the files of each project's GitHub releases.</p>
+<p>One signed apt and dnf repository with the packages of the projects of <a href="https://github.com/hstin-de">hstin</a>.
+Set it up once, then install any of them with your package manager.</p>
+
+<h2>Debian, Ubuntu</h2>
+<pre>curl -fsSLo /tmp/hstin-repo.deb @BASE@/hstin-repo.deb
+sudo apt install /tmp/hstin-repo.deb &amp;&amp; sudo apt update
+sudo apt install otterlink</pre>
+
+<h2>Fedora, RHEL</h2>
+<pre>sudo dnf install @BASE@/hstin-repo.rpm
+sudo dnf install otterlink</pre>
+<p>The package <code>hstin-repo</code> holds the repository's source and key, so a change of either arrives as an
+update; removing it removes the repository.</p>
+
+<h2>Script</h2>
+<pre>curl -fsSLO @BASE@/install.sh &amp;&amp; less install.sh &amp;&amp; sudo sh install.sh otterlink</pre>
+
+<h2>By hand</h2>
+<pre># Debian, Ubuntu
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/hstin.gpg @BASE@/keys/hstin.gpg
+printf 'Types: deb\nURIs: @BASE@/apt\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/hstin.gpg\n' |
+  sudo tee /etc/apt/sources.list.d/hstin.sources
+sudo apt update
+
+# Fedora, RHEL
+sudo curl -fsSLo /etc/pki/rpm-gpg/RPM-GPG-KEY-hstin @BASE@/keys/hstin.asc
+sudo curl -fsSLo /etc/yum.repos.d/hstin.repo @BASE@/rpm/hstin.repo</pre>
+<p>Key fingerprint: <code>@FINGERPRINT@</code> (<a href="keys/hstin.asc">keys/hstin.asc</a>).</p>
 
 <h2>Projects</h2>
 <ul>
 @PROJECTS@
 </ul>
-
-<h2>By hand (replace PROJECT)</h2>
-<pre># Debian, Ubuntu: one component per project
-sudo curl -fsSLo /usr/share/keyrings/hstin.gpg @BASE@/keys/hstin.gpg
-sudo curl -fsSLo /etc/apt/sources.list.d/PROJECT.sources @BASE@/apt/PROJECT.sources
-sudo apt-get update &amp;&amp; sudo apt-get install PROJECT
-
-# Fedora, RHEL: one repository per project
-sudo curl -fsSLo /etc/pki/rpm-gpg/RPM-GPG-KEY-hstin @BASE@/keys/hstin.asc
-sudo curl -fsSLo /etc/yum.repos.d/PROJECT.repo @BASE@/rpm/PROJECT/PROJECT.repo
-sudo dnf install PROJECT</pre>
-<p>Packages may bring their repository file and key along, so later changes of either arrive with updates.</p>
-
-<h2>Keys</h2>
-<p>Repository key: <a href="keys/hstin.asc">keys/hstin.asc</a>. Projects with signed update metadata publish it under
-<code>PROJECT/updates/</code>, checked against keys built into the project.</p>
 <p>Source: <a href="https://github.com/hstin-de/pkgs">github.com/hstin-de/pkgs</a>.</p>
 </html>
