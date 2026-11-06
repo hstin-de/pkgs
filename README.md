@@ -22,7 +22,7 @@ cd "$(mktemp -d)" && curl -fsSLO https://pkgs.hstin.de/install.sh && less instal
 change of either arrives as an update. Its packages never replace a distribution package of the same name (apt pin
 priority 100, dnf `priority=100`).
 
-Repository key fingerprint: *(added after the key is made)*
+Repository key fingerprint: `80C8 669E 42C7 7861 41EC  3004 251D 027B D7EE CC86` (also on https://pkgs.hstin.de; the two must match).
 
 ## How it works
 
