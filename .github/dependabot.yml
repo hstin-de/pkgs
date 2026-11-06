@@ -5,7 +5,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # New versions wait a week: most compromised releases are found by then.
+    cooldown:
+      default-days: 7
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    # New versions wait a week: most compromised releases are found by then.
+    cooldown:
+      default-days: 7
