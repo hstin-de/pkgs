@@ -134,7 +134,9 @@ for name in "${names[@]}"; do
 	for tag in "${tags[@]}"; do
 		while read -r sum f; do
 			case "$f" in *_linux_*.deb | *_linux_*.rpm) ;; *) continue ;; esac
-			[[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && [[ "$f" != *..* ]] && [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || continue
+			if ! [[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || [[ "$f" == *..* ]] || ! [[ "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+				continue
+			fi
 			local_file=$(fetch "$name" "$tag" "$f" "$sum")
 			if [[ "$f" == *.deb ]]; then
 				mkdir -p "$out/apt/pool/$name/$tag"
@@ -155,7 +157,9 @@ for name in "${names[@]}"; do
 	if [ "${#tags[@]}" -gt 0 ]; then
 		latest=${tags[-1]}
 		while read -r sum f; do
-			[[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && [[ "$f" != *..* ]] && [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || continue
+			if ! [[ "$f" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || [[ "$f" == *..* ]] || ! [[ "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+				continue
+			fi
 			files+="<li><a href=\"$base/dl/$name/$latest/$f\">$f</a><br><code>$sum</code></li>"$'\n'
 		done < "$rel/$latest.sums"
 		files+="<li><a href=\"$base/dl/$name/$latest/SHA256SUMS\">SHA256SUMS</a></li>"$'\n'

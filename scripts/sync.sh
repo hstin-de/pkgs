@@ -180,7 +180,9 @@ for line in "${lines[@]}"; do
 			}
 		done
 		for f in "$u"/*.json; do
-			[ -e "$f" ] && [ "$(basename "$f")" != keys.json ] || continue
+			if [ ! -e "$f" ] || [ "$(basename "$f")" = keys.json ]; then
+				continue
+			fi
 			mapfile -t -O "${#listed[@]}" listed < <(jq -r '.releases[]?.version // empty | "v" + .' "$f" 2> /dev/null | grep -E "$tag_re" || true)
 		done
 		;;
