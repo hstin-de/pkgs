@@ -212,16 +212,17 @@ for line in "${lines[@]}"; do
 	200)
 		u="$out/projects/$name/updates"
 		mkdir -p "$u"
-		while read -r f; do
+		while read -r f sha; do
 			[ -n "$f" ] || continue
-			# As JSON with the bytes in base64: the raw media type answers in
-			# UTF-8 and replaces what is not, which breaks binary signatures.
-			code=$(get "$api/repos/$repo/contents/updates/$f?ref=pkgs" "$work/file.json")
+			# The git blob, not the contents API: that one answers in UTF-8
+			# (raw and base64 alike) and replaces bytes that are not, which
+			# breaks binary signatures. The blob's hash proves the bytes.
+			[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "$name: updates/$f: no blob sha"
+			code=$(get "$api/repos/$repo/git/blobs/$sha" "$u/$f" application/vnd.github.raw)
 			[ "$code" = 200 ] || die "$name: updates/$f: HTTP $code"
-			[ "$(jq -r '.encoding' "$work/file.json")" = base64 ] || die "$name: updates/$f: not base64 (too large?)"
-			jq -r '.content' "$work/file.json" | base64 -d > "$u/$f" || die "$name: updates/$f: bad base64"
-			[ "$(wc -c < "$u/$f")" = "$(jq -r '.size' "$work/file.json")" ] || die "$name: updates/$f: size differs"
-		done < <(jq -r '.[] | select(.type == "file") | .name' "$work/updates.json" | grep -E '^[a-z0-9-]+\.json(\.sig)?$' || true)
+			got=$( (printf 'blob %d\0' "$(wc -c < "$u/$f")" && cat "$u/$f") | sha1sum | cut -d' ' -f1)
+			[ "$got" = "$sha" ] || die "$name: updates/$f: the bytes are not the committed blob"
+		done < <(jq -r '.[] | select(.type == "file") | "\(.name) \(.sha)"' "$work/updates.json" | grep -E '^[a-z0-9-]+\.json(\.sig)? ' || true)
 		for f in "$u"/*.json; do
 			[ -e "$f" ] || continue
 			[ -s "$f.sig" ] || {

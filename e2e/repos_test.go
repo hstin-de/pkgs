@@ -10,6 +10,7 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/sha1" //nolint:gosec // git's object ids
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -178,32 +179,50 @@ func fakeGitHub(t *testing.T, rels []*release, updates map[string]string) string
 		type entry struct {
 			Name string `json:"name"`
 			Type string `json:"type"`
+			SHA  string `json:"sha"`
 		}
-		list := []entry{{"README.md", "file"}}
-		for n := range updates {
-			list = append(list, entry{n, "file"})
+		list := []entry{{"README.md", "file", blobSHA([]byte("readme"))}}
+		for n, b := range updates {
+			list = append(list, entry{n, "file", blobSHA([]byte(b))})
 		}
 		_ = json.NewEncoder(w).Encode(list)
 	}))
-	// Like GitHub: the JSON form carries the bytes in base64; the raw media
-	// type answers in UTF-8 and replaces invalid bytes (as GitHub does), which
-	// would break binary signatures.
+	// Like GitHub: a file through the contents API comes back as UTF-8 with
+	// invalid bytes replaced (raw and base64 alike), which breaks binary
+	// signatures; the git blob API gives the exact bytes.
 	mux.HandleFunc("GET /repos/hstin-de/otterlink/contents/updates/{name}", auth(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := updates[r.PathValue("name")]
 		if !ok || r.URL.Query().Get("ref") != "pkgs" {
 			http.NotFound(w, r)
 			return
 		}
+		m := strings.ToValidUTF8(b, "\uFFFD")
 		if r.Header.Get("Accept") == "application/vnd.github.raw" {
-			w.Header().Set("Content-Type", "application/vnd.github.raw; charset=utf-8")
-			_, _ = w.Write([]byte(strings.ToValidUTF8(b, "\uFFFD")))
+			_, _ = w.Write([]byte(m))
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": r.PathValue("name"), "type": "file", "size": len(b),
-			"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(b))})
+			"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(m))})
+	}))
+	mux.HandleFunc("GET /repos/hstin-de/otterlink/git/blobs/{sha}", auth(func(w http.ResponseWriter, r *http.Request) {
+		for _, b := range updates {
+			if blobSHA([]byte(b)) == r.PathValue("sha") && r.Header.Get("Accept") == "application/vnd.github.raw" {
+				_, _ = w.Write([]byte(b))
+				return
+			}
+		}
+		http.NotFound(w, r)
 	}))
 	base = serve(t, mux)
 	return base
+}
+
+// blobSHA is git's object id of a blob.
+func blobSHA(b []byte) string {
+	h := sha1.New()
+	fmt.Fprintf(h, "blob %d\x00", len(b))
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // binarySig stands for an ed25519 signature: 64 bytes, most of them not UTF-8.
