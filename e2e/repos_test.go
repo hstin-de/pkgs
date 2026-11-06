@@ -370,7 +370,7 @@ rpmkeys --dbpath /tmp/db --checksig /work/store/otterlink/v0.6.0/otterlink_0.6.0
 			t.Errorf("site misses %s", f)
 		}
 	}
-	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "rpm/hstin.repo", "hstin-repo.pkg.tar.zst.sig"} {
+	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "rpm/hstin.repo"} {
 		if _, err := os.Stat(filepath.Join(built, f)); err == nil {
 			t.Errorf("site must not have %s", f)
 		}
@@ -443,8 +443,12 @@ rpmkeys --dbpath /tmp/db --checksig /work/store/otterlink/v0.6.0/otterlink_0.6.0
 	} else {
 		resp.Body.Close()
 	}
-	if resp, err := http.Get(site + "/dl/otterlink/v0.8.0/missing.txt"); err != nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("a missing file: %v %v", resp, err)
+	for _, p := range []string{"/dl/otterlink/v0.8.0/missing.txt", "/hstin-repo.deb.sig", "/no/such/page"} {
+		if resp, err := http.Get(site + p); err != nil || resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: %v %v", p, resp, err)
+		} else {
+			resp.Body.Close()
+		}
 	}
 	// A release's HTML file is a download, not a page of the site.
 	if resp, err := http.Get(site + "/dl/otterlink/v0.8.0/page.html"); err != nil {
@@ -496,11 +500,24 @@ pacman -Q otterlink hstin-repo
 pacman-key --list-keys "$FPR" > /dev/null && echo 'key trusted'
 grep -q '^Include = /etc/pacman.d/hstin-mirrorlist' /etc/pacman.conf && echo 'section added'
 pacman -S --needed --noconfirm otterlink-server sample > /dev/null
-pacman -Q otterlink-server sample`)
-		for _, want := range []string{"otterlink 0.8.0-1", "hstin-repo 1.0.0-1", "key trusted", "section added", "otterlink-server 0.8.0-1", "sample 1.0.0-1"} {
+pacman -Q otterlink-server sample
+pacman -Rns --noconfirm otterlink otterlink-server sample > /dev/null
+sed -i '/^\[hstin\]/,/^Include = \/etc\/pacman.d\/hstin-mirrorlist/d' /etc/pacman.conf
+pacman -Rns --noconfirm hstin-repo > /dev/null
+# The steps by hand, on a keyring without the key: pacman -U with the URL
+# checks URL.sig, so the key is trusted first.
+pacman-key --delete "$FPR" > /dev/null 2>&1
+if pacman -U --noconfirm $BASE/hstin-repo.pkg.tar.zst > /dev/null 2>&1; then echo 'installed without the key'; fi
+curl -fsSLo /tmp/hstin.asc $BASE/keys/hstin.asc
+pacman-key --add /tmp/hstin.asc > /dev/null 2>&1 && pacman-key --lsign-key "$FPR" > /dev/null 2>&1
+pacman -U --noconfirm $BASE/hstin-repo.pkg.tar.zst > /dev/null && echo 'by hand'`)
+		for _, want := range []string{"otterlink 0.8.0-1", "hstin-repo 1.0.0-1", "key trusted", "section added", "otterlink-server 0.8.0-1", "sample 1.0.0-1", "by hand"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, "installed without the key") {
+			t.Error("pacman -U URL installed hstin-repo without the key")
 		}
 	})
 	t.Run("fedora", func(t *testing.T) {

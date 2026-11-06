@@ -135,12 +135,13 @@ YAML
 done
 cp "$out/apt/repo/hstin-repo_${repo_version}_all.deb" "$out/hstin-repo.deb"
 cp "$out/rpm/repo/hstin-repo-${repo_version}-1.noarch.rpm" "$out/hstin-repo.rpm"
-# The Arch one without a signature beside it: `pacman -U URL` would check one
-# against a key it does not know yet (the package brings the key).
-cp "$work/hstin-repo-${arch_version}-1-any.pkg.tar.zst" "$out/hstin-repo.pkg.tar.zst"
+# The Arch one with its signature: `pacman -U URL` fetches URL.sig and checks
+# it (the key is trusted first, as with any repository on Arch).
 mkdir -p "$work/arch"
 cp "$work/hstin-repo-${arch_version}-1-any.pkg.tar.zst" "$work/arch/"
 sign --no-armor --detach-sign -o "$work/arch/hstin-repo-${arch_version}-1-any.pkg.tar.zst.sig" "$work/hstin-repo-${arch_version}-1-any.pkg.tar.zst"
+cp "$work/arch/hstin-repo-${arch_version}-1-any.pkg.tar.zst" "$out/hstin-repo.pkg.tar.zst"
+cp "$work/arch/hstin-repo-${arch_version}-1-any.pkg.tar.zst.sig" "$out/hstin-repo.pkg.tar.zst.sig"
 for a in x86_64 aarch64; do
 	cp "$work/arch/hstin-repo-${arch_version}-1-any.pkg.tar.zst" "$work/arch/hstin-repo-${arch_version}-1-any.pkg.tar.zst.sig" "$out/arch/$a/"
 done
@@ -277,6 +278,9 @@ sed "s|@BASE@|$base|g" "$here/site/install.sh" > "$out/install.sh"
 awk -v list="$list" '{ if ($0 == "@PROJECTS@") printf "%s", list; else print }' "$here/site/index.html" |
 	sed -e "s|@BASE@|$base|g" -e "s|@FINGERPRINT@|$fpr|g" > "$out/index.html"
 cp "$here/site/_headers" "$out/"
+# A 404 page: without one Pages answers unknown paths with index.html and 200
+# (pacman -U URL would take it for URL.sig).
+cp "$here/site/404.html" "$out/"
 
 printf '%s\n' "${summary[@]}"
 echo "site: ${#names[@]} projects, hstin-repo $repo_version"

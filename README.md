@@ -14,7 +14,9 @@ sudo apt install otterlink
 sudo dnf install https://pkgs.hstin.de/hstin-repo.rpm
 sudo dnf install otterlink
 
-# Arch Linux
+# Arch Linux (trust the key first: pacman checks hstin-repo's signature)
+curl -fsSLo /tmp/hstin.asc https://pkgs.hstin.de/keys/hstin.asc
+sudo pacman-key --add /tmp/hstin.asc && sudo pacman-key --lsign-key 80C8669E42C7786141EC3004251D027BD7EECC86
 sudo pacman -U https://pkgs.hstin.de/hstin-repo.pkg.tar.zst
 printf '\n[hstin]\nInclude = /etc/pacman.d/hstin-mirrorlist\n' | sudo tee -a /etc/pacman.conf
 sudo pacman -Syu otterlink
@@ -25,7 +27,8 @@ cd "$(mktemp -d)" && curl -fsSLO https://pkgs.hstin.de/install.sh && less instal
 
 `hstin-repo` holds the apt source (`deb https://pkgs.hstin.de/apt stable main`), the dnf repository or the pacman
 mirrorlist (`Server = https://pkgs.hstin.de/arch/$arch`) and the key, so a change of either arrives as an update. On Arch
-it puts the key into pacman's keyring (`pacman-key --populate hstin`); the `[hstin]` section is added by hand once. Its packages never replace a distribution package of the same name (apt pin
+it puts the key into pacman's keyring (`pacman-key --populate hstin`); the `[hstin]` section is added by hand once
+(and removed before `hstin-repo`, should it go). Its packages never replace a distribution package of the same name (apt pin
 priority 100, dnf `priority=100`).
 
 Repository key fingerprint: `80C8 669E 42C7 7861 41EC  3004 251D 027B D7EE CC86` (also on https://pkgs.hstin.de; the two must match).

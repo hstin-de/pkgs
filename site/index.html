@@ -24,11 +24,15 @@ sudo apt install otterlink</pre>
 sudo dnf install otterlink</pre>
 
 <h2>Arch Linux</h2>
-<pre>sudo pacman -U @BASE@/hstin-repo.pkg.tar.zst
+<pre>curl -fsSLo /tmp/hstin.asc @BASE@/keys/hstin.asc
+sudo pacman-key --add /tmp/hstin.asc &amp;&amp; sudo pacman-key --lsign-key @FINGERPRINT@
+sudo pacman -U @BASE@/hstin-repo.pkg.tar.zst
 printf '\n[hstin]\nInclude = /etc/pacman.d/hstin-mirrorlist\n' | sudo tee -a /etc/pacman.conf
 sudo pacman -Syu otterlink</pre>
-<p><code>hstin-repo</code> brings the key into pacman's keyring and the mirrorlist; the section in
-<code>pacman.conf</code> is added once by hand, as for any repository on Arch.</p>
+<p>The key is trusted first (check the fingerprint below), so pacman checks <code>hstin-repo</code> too; it keeps
+the key current and brings the mirrorlist; the section in
+<code>pacman.conf</code> is added once by hand, as for any repository on Arch (and removed before
+<code>hstin-repo</code>, should you remove it).</p>
 
 <h2>Script</h2>
 <pre>cd "$(mktemp -d)" &amp;&amp; curl -fsSLO @BASE@/install.sh &amp;&amp; less install.sh &amp;&amp; sudo sh install.sh otterlink</pre>
