@@ -44,7 +44,6 @@ jobs:
       - name: Site
         env:
           REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY }}
-          REPO_GPG_FINGERPRINT: ${{ secrets.REPO_GPG_FINGERPRINT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
@@ -53,7 +52,7 @@ jobs:
           GNUPGHOME=$(mktemp -d)
           export GNUPGHOME
           echo "$REPO_GPG_KEY" | gpg --batch --import
-          REPO_KEY="$REPO_GPG_FINGERPRINT" scripts/build.sh out
+          REPO_KEY=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr/ {print $10; exit}') scripts/build.sh out
       - uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

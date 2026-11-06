@@ -6,4 +6,4 @@ compatibility_date = "2026-11-01"
 # The release files (publish.sh uploads them), private: functions/ serves them.
 [[r2_buckets]]
 binding = "DL"
-bucket_name = "hstin-dl"
+bucket_name = "hstin-pkgs"

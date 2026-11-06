@@ -11,13 +11,13 @@
 #
 # Environment: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (an R2 API token),
 # R2_ENDPOINT (https://<account>.r2.cloudflarestorage.com), R2_BUCKET (default
-# hstin-dl), KEEP (default 8), DRY_RUN=1 to change nothing remote.
+# hstin-pkgs), KEEP (default 8), DRY_RUN=1 to change nothing remote.
 set -euo pipefail
 
 project=${1:?usage: publish.sh PROJECT [TAG] DIR}
 if [ $# -eq 3 ]; then tag=$2 dir=$3; else tag="" dir=${2:?usage: publish.sh PROJECT [TAG] DIR}; fi
 root=$(cd "$(dirname "$0")/.." && pwd)
-bucket=${R2_BUCKET:-hstin-dl}
+bucket=${R2_BUCKET:-hstin-pkgs}
 keep=${KEEP:-8}
 [[ "$project" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
 	echo "publish.sh: bad project name $project" >&2

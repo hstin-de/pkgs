@@ -178,7 +178,7 @@ gpg --batch --armor --export-secret-keys > /work/key.asc`)
 			}
 		}
 		out := publish(nil, rel.project, "v"+rel.version, in)
-		if !strings.Contains(out, "dry run: aws s3 cp "+in+"/files/ s3://hstin-dl/"+rel.project+"/v"+rel.version+"/") {
+		if !strings.Contains(out, "dry run: aws s3 cp "+in+"/files/ s3://hstin-pkgs/"+rel.project+"/v"+rel.version+"/") {
 			t.Errorf("publish.sh did not upload:\n%s", out)
 		}
 		dl := filepath.Join(work, "dl", rel.project, "v"+rel.version)
@@ -225,14 +225,14 @@ gpg --batch --armor --export-secret-keys > /work/key.asc`)
 	seed := filepath.Join(work, "seed")
 	must(t, os.MkdirAll(seed, 0o777))
 	must(t, os.WriteFile(filepath.Join(seed, "wrangler.toml"), []byte(
-		"name = \"seed\"\ncompatibility_date = \"2026-11-01\"\n[[r2_buckets]]\nbinding = \"DL\"\nbucket_name = \"hstin-dl\"\n"), 0o644))
+		"name = \"seed\"\ncompatibility_date = \"2026-11-01\"\n[[r2_buckets]]\nbinding = \"DL\"\nbucket_name = \"hstin-pkgs\"\n"), 0o644))
 	var puts []string
 	must(t, filepath.Walk(filepath.Join(work, "dl"), func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
 		key, _ := filepath.Rel(filepath.Join(work, "dl"), p)
-		puts = append(puts, fmt.Sprintf("$w r2 object put 'hstin-dl/%s' --file '/work/dl/%s' --local --persist-to /work/wr > /dev/null", key, key))
+		puts = append(puts, fmt.Sprintf("$w r2 object put 'hstin-pkgs/%s' --file '/work/dl/%s' --local --persist-to /work/wr > /dev/null", key, key))
 		return nil
 	}))
 	script := "set -e\nmkdir -p /work/tool && cd /work/tool && npm install --silent --no-audit --no-fund wrangler@4 > /dev/null\n" +
@@ -321,7 +321,7 @@ if dnf install -y -q otterlink-0.6.0 2>/dev/null; then echo 'unsigned installed'
 
 	// Pruning: with KEEP=2 the oldest release goes from R2 and the lists.
 	out = publish([]string{"KEEP=2"}, "otterlink", filepath.Join(work, "in", "otterlink", "v0.8.0"))
-	if !strings.Contains(out, "dry run: aws s3 rm s3://hstin-dl/otterlink/v0.6.0/ --recursive") || !strings.Contains(out, "removed otterlink v0.6.0") {
+	if !strings.Contains(out, "dry run: aws s3 rm s3://hstin-pkgs/otterlink/v0.6.0/ --recursive") || !strings.Contains(out, "removed otterlink v0.6.0") {
 		t.Errorf("prune:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(src, "projects", "otterlink", "releases", "v0.6.0.txt")); err == nil {

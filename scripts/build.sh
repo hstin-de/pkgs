@@ -11,7 +11,7 @@
 #
 # Environment:
 #   REPO_KEY   OpenPGP key id or fingerprint of the repository key in GNUPGHOME (required)
-#   R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, R2_BUCKET (default hstin-dl):
+#   R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, R2_BUCKET (default hstin-pkgs):
 #              fetch the packages from R2; without R2_ENDPOINT from DL_URL/<project>/<tag>/<file>
 #   PKGS_URL   the site's own URL (default https://pkgs.hstin.de)
 #   ROOT       the repository with projects.txt and projects/ (default this script's)
@@ -25,7 +25,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 root=${ROOT:-$here}
 base=${PKGS_URL:-https://pkgs.hstin.de}
 cache=${CACHE:-$HOME/.cache/hstin-pkgs}
-bucket=${R2_BUCKET:-hstin-dl}
+bucket=${R2_BUCKET:-hstin-pkgs}
 for t in apt-ftparchive createrepo_c rpmkeys gpg nfpm; do
 	command -v "$t" > /dev/null || {
 		echo "build.sh: $t not found" >&2
