@@ -214,8 +214,13 @@ for line in "${lines[@]}"; do
 		mkdir -p "$u"
 		while read -r f; do
 			[ -n "$f" ] || continue
-			code=$(get "$api/repos/$repo/contents/updates/$f?ref=pkgs" "$u/$f" application/vnd.github.raw)
+			# As JSON with the bytes in base64: the raw media type answers in
+			# UTF-8 and replaces what is not, which breaks binary signatures.
+			code=$(get "$api/repos/$repo/contents/updates/$f?ref=pkgs" "$work/file.json")
 			[ "$code" = 200 ] || die "$name: updates/$f: HTTP $code"
+			[ "$(jq -r '.encoding' "$work/file.json")" = base64 ] || die "$name: updates/$f: not base64 (too large?)"
+			jq -r '.content' "$work/file.json" | base64 -d > "$u/$f" || die "$name: updates/$f: bad base64"
+			[ "$(wc -c < "$u/$f")" = "$(jq -r '.size' "$work/file.json")" ] || die "$name: updates/$f: size differs"
 		done < <(jq -r '.[] | select(.type == "file") | .name' "$work/updates.json" | grep -E '^[a-z0-9-]+\.json(\.sig)?$' || true)
 		for f in "$u"/*.json; do
 			[ -e "$f" ] || continue

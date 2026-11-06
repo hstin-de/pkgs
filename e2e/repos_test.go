@@ -9,7 +9,9 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -183,17 +185,35 @@ func fakeGitHub(t *testing.T, rels []*release, updates map[string]string) string
 		}
 		_ = json.NewEncoder(w).Encode(list)
 	}))
+	// Like GitHub: the JSON form carries the bytes in base64; the raw media
+	// type answers in UTF-8 and replaces invalid bytes (as GitHub does), which
+	// would break binary signatures.
 	mux.HandleFunc("GET /repos/hstin-de/otterlink/contents/updates/{name}", auth(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := updates[r.PathValue("name")]
-		if !ok || r.URL.Query().Get("ref") != "pkgs" || r.Header.Get("Accept") != "application/vnd.github.raw" {
+		if !ok || r.URL.Query().Get("ref") != "pkgs" {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = w.Write([]byte(b))
+		if r.Header.Get("Accept") == "application/vnd.github.raw" {
+			w.Header().Set("Content-Type", "application/vnd.github.raw; charset=utf-8")
+			_, _ = w.Write([]byte(strings.ToValidUTF8(b, "\uFFFD")))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": r.PathValue("name"), "type": "file", "size": len(b),
+			"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(b))})
 	}))
 	base = serve(t, mux)
 	return base
 }
+
+// binarySig stands for an ed25519 signature: 64 bytes, most of them not UTF-8.
+var binarySig = func() []byte {
+	b := make([]byte, 64)
+	for i := range b {
+		b[i] = byte(0x80 + i)
+	}
+	return b
+}()
 
 func TestRepositories(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -269,7 +289,7 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 		// The manifest lists v0.6.0 (kept beyond KEEP below) and v0.5.0, which
 		// is no published release.
 		"stable.json":     `{"channel":"stable","releases":[{"version":"0.5.0"},{"version":"0.6.0"},{"version":"0.8.0"}]}`,
-		"stable.json.sig": "sig", "keys.json": `{"k":1}`, "keys.json.sig": "sig",
+		"stable.json.sig": string(binarySig), "keys.json": `{"k":1}`, "keys.json.sig": string(binarySig),
 	})
 
 	tools := func(env []string, cmd ...string) (string, error) {
@@ -320,6 +340,10 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 		if _, err := os.Stat(filepath.Join(work, f)); err == nil {
 			t.Errorf("must not exist: %s", f)
 		}
+	}
+	// The signatures arrive byte for byte.
+	if b, err := os.ReadFile(filepath.Join(work, "state", "projects", "otterlink", "updates", "stable.json.sig")); err != nil || !bytes.Equal(b, binarySig) {
+		t.Errorf("stable.json.sig changed on the way: %x (%v)", b, err)
 	}
 	// The rpms in the store carry the repository key's signature.
 	if out, err := tools(nil, "sh", "-c", `set -e; gpg --batch --armor --export "$REPO_KEY" > /tmp/k.asc
