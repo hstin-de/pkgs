@@ -9,6 +9,8 @@
   Cache-Control: no-cache
 /rpm/repodata/*
   Cache-Control: no-cache
+/arch/*
+  Cache-Control: no-cache
 /hstin-repo.*
   Cache-Control: no-cache
 /install.sh

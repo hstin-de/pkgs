@@ -1,0 +1,4 @@
+# The hstin package repository (package hstin-repo). In /etc/pacman.conf:
+#   [hstin]
+#   Include = /etc/pacman.d/hstin-mirrorlist
+Server = @BASE@/arch/$arch

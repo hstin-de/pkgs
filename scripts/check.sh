@@ -10,6 +10,8 @@ base=${1:?usage: check.sh BASE OUT}
 out=${2:?usage: check.sh BASE OUT}
 curl -fsS "$base/apt/dists/stable/InRelease" | grep -q "Components: main"
 curl -fsSI "$base/hstin-repo.deb" > /dev/null
+curl -fsSI "$base/hstin-repo.pkg.tar.zst" > /dev/null
+curl -fsSI "$base/arch/x86_64/hstin.db.sig" > /dev/null
 for latest in "$out"/*/latest.txt; do
 	[ -e "$latest" ] || continue
 	project=$(basename "$(dirname "$latest")")

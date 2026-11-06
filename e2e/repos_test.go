@@ -2,8 +2,8 @@
 // on a fake GitHub API go through scripts/sync.sh (digests, package names, rpm
 // signing) into a local store, the site is built (scripts/build.sh) and served
 // by `wrangler pages dev` with its functions and the store as the R2 bucket,
-// and hstin-repo, the install script, apt and dnf install from it in Debian
-// and Fedora containers.
+// and hstin-repo, the install script, apt, dnf and pacman install from it in
+// Debian, Fedora and Arch containers.
 //
 //	go test -count=1 -v ./e2e/
 package e2e
@@ -27,9 +27,11 @@ import (
 
 const toolsImage = "hstin-pkgs-tools"
 
+// The tools image is the deploy's runner (ubuntu-24.04) with the same packages.
 const toolsDockerfile = `FROM goreleaser/nfpm:latest AS nfpm
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends apt-utils createrepo-c rpm gnupg ca-certificates curl jq && rm -rf /var/lib/apt/lists/*
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends apt-utils createrepo-c rpm gnupg ca-certificates curl jq \
+  pacman-package-manager makepkg libarchive-tools zstd && rm -rf /var/lib/apt/lists/*
 COPY --from=nfpm /usr/bin/nfpm /usr/bin/nfpm
 `
 
@@ -246,12 +248,17 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 		must(t, os.MkdirAll(rel.dir, 0o777))
 		for _, name := range rel.packages {
 			for _, arch := range []string{"amd64", "arm64"} {
-				for _, format := range []string{"deb", "rpm"} {
+				formats := []string{"deb", "rpm", "archlinux"}
+				if rel.pre || rel.draft {
+					formats = formats[:2] // pkgver takes no "-"; these stay out anyway
+				}
+				for _, format := range formats {
 					base := name + "_" + v + "_linux_" + arch
+					ext := map[string]string{"deb": ".deb", "rpm": ".rpm", "archlinux": ".pkg.tar.zst"}[format]
 					must(t, os.WriteFile(filepath.Join(work, base+".yaml"), []byte(nfpmConfig(name, arch, v)), 0o644))
 					docker(t, "run", "--rm", "--user", user(), "-v", work+":/work", "-w", "/work", "goreleaser/nfpm:latest",
 						"package", "-f", "/work/"+base+".yaml", "-p", format,
-						"-t", "/work/gh/"+rel.repo+"/"+rel.tag+"/"+base+"."+format)
+						"-t", "/work/gh/"+rel.repo+"/"+rel.tag+"/"+base+ext)
 				}
 			}
 		}
@@ -286,7 +293,7 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 	out := sync()
 	t.Logf("sync.sh:\n%s", out)
 	for _, want := range []string{
-		"otterlink v0.8.0: stored 10 files",
+		"otterlink v0.8.0: stored 18 files",
 		`sample v1.1.0: otterlink_1.1.0_linux_amd64.deb is the package "otterlink"; sample may only publish sample and sample-*`,
 		"sample v1.2.0: notes.txt does not match the digest GitHub recorded",
 	} {
@@ -299,7 +306,8 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 			t.Errorf("sync.sh took %q", bad)
 		}
 	}
-	for _, f := range []string{"otterlink/v0.6.0/SHA256SUMS", "otterlink/v0.8.0/otterlink_0.8.0_linux_amd64.rpm", "sample/v1.0.0/SHA256SUMS", "state/projects/otterlink/updates/stable.json.sig"} {
+	for _, f := range []string{"otterlink/v0.6.0/SHA256SUMS", "otterlink/v0.8.0/otterlink_0.8.0_linux_amd64.rpm",
+		"otterlink/v0.8.0/otterlink_0.8.0_linux_arm64.pkg.tar.zst.sig", "sample/v1.0.0/SHA256SUMS", "state/projects/otterlink/updates/stable.json.sig"} {
 		p := filepath.Join(work, "store", f)
 		if strings.HasPrefix(f, "state/") {
 			p = filepath.Join(work, f)
@@ -323,6 +331,27 @@ rpmkeys --dbpath /tmp/db --checksig /work/store/otterlink/v0.6.0/otterlink_0.6.0
 	if out := sync(); strings.Contains(out, "stored") {
 		t.Errorf("second sync stored again:\n%s", out)
 	}
+	// A release stored before pkgs signed Arch packages gets the signatures.
+	old := filepath.Join(work, "store", "otterlink", "v0.7.3")
+	sums, err := os.ReadFile(filepath.Join(old, "SHA256SUMS"))
+	must(t, err)
+	var kept []string
+	for _, l := range strings.Split(strings.TrimSpace(string(sums)), "\n") {
+		if !strings.HasSuffix(l, ".sig") {
+			kept = append(kept, l)
+		}
+	}
+	must(t, os.WriteFile(filepath.Join(old, "SHA256SUMS"), []byte(strings.Join(kept, "\n")+"\n"), 0o644))
+	matches, _ := filepath.Glob(filepath.Join(old, "*.sig"))
+	for _, m := range matches {
+		must(t, os.Remove(m))
+	}
+	if out := sync(); !strings.Contains(out, "otterlink v0.7.3: signed 4 Arch packages") || strings.Contains(out, "stored") {
+		t.Errorf("signatures for a stored release:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(old, "otterlink-server_0.7.3_linux_amd64.pkg.tar.zst.sig")); err != nil {
+		t.Error("no signature added")
+	}
 
 	// The site, from the state and the store.
 	port := freePort(t)
@@ -334,13 +363,14 @@ rpmkeys --dbpath /tmp/db --checksig /work/store/otterlink/v0.6.0/otterlink_0.6.0
 	t.Logf("build.sh:\n%s", out)
 	built := filepath.Join(src, "out")
 	for _, f := range []string{"apt/dists/stable/InRelease", "rpm/repodata/repomd.xml.asc", "hstin-repo.deb",
-		"hstin-repo.rpm", "otterlink/updates/stable.json.sig", "otterlink/index.html", "otterlink/latest.txt", "sample/index.html",
+		"hstin-repo.rpm", "hstin-repo.pkg.tar.zst", "arch/x86_64/hstin.db", "arch/x86_64/hstin.db.sig", "arch/aarch64/hstin.files.sig",
+		"arch/x86_64/hstin-repo-1.0.0-1-any.pkg.tar.zst.sig", "arch/files.json", "otterlink/updates/stable.json.sig", "otterlink/index.html", "otterlink/latest.txt", "sample/index.html",
 		"install.sh", "keys/hstin.gpg", "index.html"} {
 		if _, err := os.Stat(filepath.Join(built, f)); err != nil {
 			t.Errorf("site misses %s", f)
 		}
 	}
-	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "rpm/hstin.repo"} {
+	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "rpm/hstin.repo", "hstin-repo.pkg.tar.zst.sig"} {
 		if _, err := os.Stat(filepath.Join(built, f)); err == nil {
 			t.Errorf("site must not have %s", f)
 		}
@@ -454,6 +484,23 @@ apt-get install -y -qq sample > /dev/null
 dpkg-query -W -f='${Package} ${Version}\n' sample`)
 		if !strings.Contains(out, "sample 1.0.0") {
 			t.Errorf("hstin-repo, then apt install:\n%s", out)
+		}
+	})
+	t.Run("arch", func(t *testing.T) {
+		// Only the hstin repository: pacman -Syu then upgrades nothing else.
+		out := docker(t, "run", "--rm", "--network", "host", "-e", "BASE="+site, "-e", "FPR="+fpr, "archlinux:base", "sh", "-c", `set -e
+sed -i '/^\[core\]/,$d' /etc/pacman.conf
+pacman-key --init > /dev/null 2>&1
+cd "$(mktemp -d)" && curl -fsSLO $BASE/install.sh && sh install.sh otterlink > /dev/null
+pacman -Q otterlink hstin-repo
+pacman-key --list-keys "$FPR" > /dev/null && echo 'key trusted'
+grep -q '^Include = /etc/pacman.d/hstin-mirrorlist' /etc/pacman.conf && echo 'section added'
+pacman -S --needed --noconfirm otterlink-server sample > /dev/null
+pacman -Q otterlink-server sample`)
+		for _, want := range []string{"otterlink 0.8.0-1", "hstin-repo 1.0.0-1", "key trusted", "section added", "otterlink-server 0.8.0-1", "sample 1.0.0-1"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
 		}
 	})
 	t.Run("fedora", func(t *testing.T) {

@@ -1,8 +1,10 @@
 #!/bin/sh
 # Sets up the hstin package repository (@BASE@) by installing hstin-repo,
-# which brings the apt source or dnf repository and the signing key along,
-# then installs the packages given, if any. Afterwards: apt install PACKAGE,
-# or dnf install PACKAGE.
+# which brings the apt source, dnf repository or pacman mirrorlist and the
+# signing key along, then installs the packages given, if any. Afterwards:
+# apt install PACKAGE, dnf install PACKAGE or pacman -Syu PACKAGE. On Arch,
+# installing packages upgrades the whole system (pacman -Syu): Arch does not
+# support partial upgrades.
 #
 #   cd "$(mktemp -d)" && curl -fsSLO @BASE@/install.sh && less install.sh && sudo sh install.sh [PACKAGE…]
 #
@@ -41,8 +43,16 @@ main() {
 		"$dnf" install -y "$tmp/hstin-repo.rpm"
 		[ $# -eq 0 ] || "$dnf" install -y "$@"
 		cmd="$dnf install"
+	elif command -v pacman > /dev/null; then
+		fetch "$base/hstin-repo.pkg.tar.zst" "$tmp/hstin-repo.pkg.tar.zst"
+		pacman -U --needed --noconfirm "$tmp/hstin-repo.pkg.tar.zst"
+		if ! grep -q '^\[hstin\]' /etc/pacman.conf; then
+			printf '\n[hstin]\nInclude = /etc/pacman.d/hstin-mirrorlist\n' >> /etc/pacman.conf
+		fi
+		[ $# -eq 0 ] || pacman -Syu --needed --noconfirm "$@"
+		cmd="pacman -Syu"
 	else
-		echo "no apt or dnf: see $base for downloads" >&2
+		echo "no apt, dnf or pacman: see $base for downloads" >&2
 		exit 1
 	fi
 	echo "The hstin repository is set up${1:+, installed: $*}. More with: $cmd PACKAGE"

@@ -23,6 +23,13 @@ sudo apt install otterlink</pre>
 <pre>sudo dnf install @BASE@/hstin-repo.rpm
 sudo dnf install otterlink</pre>
 
+<h2>Arch Linux</h2>
+<pre>sudo pacman -U @BASE@/hstin-repo.pkg.tar.zst
+printf '\n[hstin]\nInclude = /etc/pacman.d/hstin-mirrorlist\n' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syu otterlink</pre>
+<p><code>hstin-repo</code> brings the key into pacman's keyring and the mirrorlist; the section in
+<code>pacman.conf</code> is added once by hand, as for any repository on Arch.</p>
+
 <h2>Script</h2>
 <pre>cd "$(mktemp -d)" &amp;&amp; curl -fsSLO @BASE@/install.sh &amp;&amp; less install.sh &amp;&amp; sudo sh install.sh otterlink</pre>
 <p>It installs <code>hstin-repo</code>, then the packages named.</p>
@@ -33,7 +40,8 @@ update; removing it removes the repository. Packages of this repository never re
 with the same name.</p>
 <p>Fingerprint: <code>@FINGERPRINT@</code> (<a href="keys/hstin.asc">keys/hstin.asc</a>; also in the README of
 <a href="https://github.com/hstin-de/pkgs">github.com/hstin-de/pkgs</a>). Check the installed key with
-<code>gpg --show-keys /usr/share/keyrings/hstin.gpg</code> or <code>rpm -qi gpg-pubkey</code>.</p>
+<code>gpg --show-keys /usr/share/keyrings/hstin.gpg</code>, <code>rpm -qi gpg-pubkey</code> or
+<code>pacman-key --list-keys @FINGERPRINT@</code>.</p>
 
 <h2>Projects</h2>
 <ul>

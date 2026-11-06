@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
       - name: Tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm pacman-package-manager makepkg libarchive-tools
           curl -fsSL -o "$RUNNER_TEMP/nfpm.tar.gz" \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
           echo "$NFPM_SHA256  $RUNNER_TEMP/nfpm.tar.gz" | sha256sum -c --quiet

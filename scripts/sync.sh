@@ -9,8 +9,9 @@
 # A project's line in projects.txt is "NAME OWNER/REPO". Its releases are the
 # newest KEEP published, non-prerelease GitHub releases tagged vX.Y.Z that
 # pass the checks. One that is not in the store yet is downloaded; every asset must match the SHA-256
-# digest GitHub recorded, every deb and rpm must be named NAME or NAME-*, rpms
-# are signed with the repository key; then the files are uploaded, SHA256SUMS
+# digest GitHub recorded, every deb, rpm and Arch package must be named NAME or
+# NAME-*, rpms are signed with the repository key and Arch packages get a
+# detached signature (FILE.sig, as pacman wants); then the files are uploaded, SHA256SUMS
 # last (a release without it is incomplete and done again). A release failing
 # a check is left out with a warning; the other releases and projects go on.
 # The signed update metadata comes from the project's branch `pkgs`, directory
@@ -27,7 +28,7 @@
 #   REPO_KEY    key id or fingerprint of the repository key in GNUPGHOME
 #   KEEP        releases kept per project (default 8)
 #   ROOT        the directory with projects.txt (default this repository)
-# Needs curl, jq, dpkg-deb, rpm, rpmsign, rpmkeys, gpg, sha256sum (and aws).
+# Needs curl, jq, dpkg-deb, rpm, rpmsign, rpmkeys, bsdtar, gpg, sha256sum (and aws).
 set -euo pipefail
 
 out=${1:?usage: sync.sh OUT}
@@ -73,6 +74,18 @@ gpg --batch --armor --export "$REPO_KEY" > "$work/key.asc"
 [ -s "$work/key.asc" ] || die "key $REPO_KEY not in GNUPGHOME"
 rpmkeys --dbpath "$work/rpmdb" --import "$work/key.asc"
 
+# archname FILE: the pkgname of an Arch package ("?" if it has none).
+archname() {
+	local n
+	n=$(bsdtar -xOf "$1" .PKGINFO 2> /dev/null | sed -n 's/^pkgname = //p' | head -1)
+	echo "${n:-?}"
+}
+
+# archsign FILE: FILE.sig, the detached signature pacman checks.
+archsign() {
+	gpg --batch --yes --local-user "$REPO_KEY" --no-armor --detach-sign -o "$1.sig" "$1"
+}
+
 # fetch NAME REPO TAG: downloads, checks and signs the release into
 # $work/rel and writes $work/SHA256SUMS; fails (after a warning) on any check.
 fetch() {
@@ -85,7 +98,7 @@ fetch() {
 		return 1
 	}
 	while IFS=$'\t' read -r f url digest; do
-		if ! [[ "$f" =~ $file_re ]] || [[ "$f" == *..* ]] || [ "$f" = SHA256SUMS ]; then
+		if ! [[ "$f" =~ $file_re ]] || [[ "$f" == *..* ]] || [ "$f" = SHA256SUMS ] || [[ "$f" == *.pkg.tar.zst.sig ]]; then
 			warn "$name $tag: asset name $f not allowed, left out"
 			continue
 		fi
@@ -106,18 +119,21 @@ fetch() {
 		case "$f" in
 		*.deb) pkg=$(dpkg-deb -f "$d/$f" Package) || pkg="?" ;;
 		*.rpm) pkg=$(rpm -qp --nosignature --qf '%{NAME}' "$d/$f" 2> /dev/null) || pkg="?" ;;
+		*.pkg.tar.zst) pkg=$(archname "$d/$f") ;;
 		esac
 		if [ -n "$pkg" ] && [ "$pkg" != "$name" ] && [[ "$pkg" != "$name"-* ]]; then
 			warn "$name $tag: $f is the package \"$pkg\"; $name may only publish $name and $name-*"
 			return 1
 		fi
 		if [[ "$f" == *.rpm ]]; then
-			rpmsign --addsign --define "_gpg_name $REPO_KEY" "$d/$f" > /dev/null
+			# The gpg on PATH (Ubuntu's rpm looks for gpg2); GPG_TTY set: batch, no tty.
+			GPG_TTY=/dev/null rpmsign --addsign --define "_gpg_name $REPO_KEY" --define "__gpg $(command -v gpg)" "$d/$f" > /dev/null
 			rpmkeys --dbpath "$work/rpmdb" --checksig "$d/$f" | grep -q 'signatures OK' || {
 				warn "$name $tag: signing $f failed"
 				return 1
 			}
 		fi
+		[[ "$f" != *.pkg.tar.zst ]] || archsign "$d/$f"
 		n=$((n + 1))
 	done < <(jq -r '.assets[] | [.name, .url, (.digest // "")] | @tsv' "$work/release.json")
 	[ "$n" -gt 0 ] || {
@@ -127,12 +143,42 @@ fetch() {
 	(cd "$d" && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum) > "$work/SHA256SUMS"
 }
 
+# archsigs NAME TAG SUMS: a release stored before pkgs signed Arch packages
+# gets the signatures now (the packages checked against SUMS and named like
+# the project first), and SUMS lists them.
+archsigs() {
+	local name=$1 tag=$2 sums=$3 sum f p n=0
+	while read -r sum f; do
+		[[ "$f" == *.pkg.tar.zst ]] || continue
+		grep -q "  $f.sig\$" "$sums" && continue
+		p="$work/arch/$f"
+		mkdir -p "$work/arch"
+		store_get "$name/$tag/$f" "$p"
+		echo "$sum  $p" | sha256sum -c --quiet --status - || die "$name/$tag/$f does not match its SHA256SUMS"
+		pkg=$(archname "$p")
+		if [ "$pkg" != "$name" ] && [[ "$pkg" != "$name"-* ]]; then
+			warn "$name $tag: $f is the package \"$pkg\"; left out of the Arch repository"
+			continue
+		fi
+		archsign "$p"
+		store_put "$p.sig" "$name/$tag/$f.sig"
+		(cd "$work/arch" && sha256sum "$f.sig") >> "$sums"
+		rm -f "$p" "$p.sig"
+		n=$((n + 1))
+	done < <(cat "$sums")
+	[ "$n" -gt 0 ] || return 0
+	LC_ALL=C sort -k2 -o "$sums" "$sums"
+	store_put "$sums" "$name/$tag/SHA256SUMS"
+	echo "$name $tag: signed $n Arch packages"
+}
+
 # take NAME REPO TAG: the release is in the store (stored now if it was not)
 # and its sums in OUT; fails if it does not pass the checks.
 take() {
 	local name=$1 repo=$2 tag=$3 rel="$out/projects/$1/releases"
 	if store_has "$name/$tag/SHA256SUMS"; then
 		store_get "$name/$tag/SHA256SUMS" "$rel/$tag.sums"
+		archsigs "$name" "$tag" "$rel/$tag.sums"
 		return
 	fi
 	fetch "$name" "$repo" "$tag" || return 1
