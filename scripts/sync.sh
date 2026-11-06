@@ -13,8 +13,10 @@
 # are signed with the repository key; then the files are uploaded, SHA256SUMS
 # last (a release without it is incomplete and done again). A release failing
 # a check is left out with a warning; the other releases and projects go on.
-# Stored releases beyond those are removed. The signed update metadata comes
-# from the project's branch `pkgs`, directory updates/.
+# The signed update metadata comes from the project's branch `pkgs`, directory
+# updates/; every release its manifests still list is kept as well (updates
+# download from here), up to 4×KEEP in all. Stored releases beyond those are
+# removed.
 #
 #   scripts/sync.sh OUT
 #
@@ -125,6 +127,23 @@ fetch() {
 	(cd "$d" && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum) > "$work/SHA256SUMS"
 }
 
+# take NAME REPO TAG: the release is in the store (stored now if it was not)
+# and its sums in OUT; fails if it does not pass the checks.
+take() {
+	local name=$1 repo=$2 tag=$3 rel="$out/projects/$1/releases"
+	if store_has "$name/$tag/SHA256SUMS"; then
+		store_get "$name/$tag/SHA256SUMS" "$rel/$tag.sums"
+		return
+	fi
+	fetch "$name" "$repo" "$tag" || return 1
+	while read -r _ f; do
+		store_put "$work/rel/$f" "$name/$tag/$f"
+	done < "$work/SHA256SUMS"
+	store_put "$work/SHA256SUMS" "$name/$tag/SHA256SUMS"
+	cp "$work/SHA256SUMS" "$rel/$tag.sums"
+	echo "$name $tag: stored $(wc -l < "$work/SHA256SUMS") files"
+}
+
 mapfile -t lines < <(grep -Ev '^[[:space:]]*(#|$)' "$root/projects.txt")
 [ "${#lines[@]}" -gt 0 ] || die "no projects in $root/projects.txt"
 rm -rf "$out"
@@ -139,40 +158,9 @@ for line in "${lines[@]}"; do
 	rel="$out/projects/$name/releases"
 	mkdir -p "$rel"
 
-	code=$(get "$api/repos/$repo/releases?per_page=100" "$work/releases.json")
-	[ "$code" = 200 ] || die "$name: the releases of $repo: HTTP $code (is the reader app installed there?)"
-	mapfile -t all < <(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name' "$work/releases.json" |
-		grep -E "$tag_re" | sort -rV)
-	tags=()
-	for tag in "${all[@]}"; do
-		[ "${#tags[@]}" -lt "$keep" ] || break
-		if store_has "$name/$tag/SHA256SUMS"; then
-			store_get "$name/$tag/SHA256SUMS" "$rel/$tag.sums"
-		else
-			fetch "$name" "$repo" "$tag" || continue
-			while read -r _ f; do
-				store_put "$work/rel/$f" "$name/$tag/$f"
-			done < "$work/SHA256SUMS"
-			store_put "$work/SHA256SUMS" "$name/$tag/SHA256SUMS"
-			cp "$work/SHA256SUMS" "$rel/$tag.sums"
-			echo "$name $tag: stored $(wc -l < "$work/SHA256SUMS") files"
-		fi
-		tags+=("$tag")
-	done
-
-	# Releases the store holds that are no longer among the kept ones.
-	while read -r have; do
-		[ -n "$have" ] || continue
-		if [ "${#tags[@]}" -eq 0 ]; then
-			warn "$name: no release could be kept; the stored ones stay"
-			break
-		fi
-		printf '%s\n' "${tags[@]}" | grep -qxF "$have" && continue
-		store_rm "$name" "$have"
-		echo "$name $have: removed"
-	done < <(store_dirs "$name")
-
-	# The signed update metadata from the branch pkgs.
+	# The signed update metadata from the branch pkgs, and the releases its
+	# manifests list (not checked here: the clients check the signatures).
+	listed=()
 	code=$(get "$api/repos/$repo/contents/updates?ref=pkgs" "$work/updates.json")
 	case "$code" in
 	200)
@@ -191,9 +179,54 @@ for line in "${lines[@]}"; do
 				break
 			}
 		done
+		for f in "$u"/*.json; do
+			[ -e "$f" ] && [ "$(basename "$f")" != keys.json ] || continue
+			mapfile -t -O "${#listed[@]}" listed < <(jq -r '.releases[]?.version // empty | "v" + .' "$f" 2> /dev/null | grep -E "$tag_re" || true)
+		done
 		;;
 	404) ;;
 	*) die "$name: updates of $repo: HTTP $code" ;;
 	esac
+
+	code=$(get "$api/repos/$repo/releases?per_page=100" "$work/releases.json")
+	[ "$code" = 200 ] || die "$name: the releases of $repo: HTTP $code (is the reader app installed there?)"
+	mapfile -t all < <(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name' "$work/releases.json" |
+		grep -E "$tag_re" | sort -rV)
+	tags=()
+	for tag in "${all[@]}"; do
+		[ "${#tags[@]}" -lt "$keep" ] || break
+		take "$name" "$repo" "$tag" && tags+=("$tag")
+	done
+	# Older releases the update manifests still list.
+	while read -r tag; do
+		[ -n "$tag" ] || continue
+		printf '%s\n' "${tags[@]}" | grep -qxF "$tag" && continue
+		if ! printf '%s\n' "${all[@]}" | grep -qxF "$tag"; then
+			warn "$name: the update metadata lists $tag, which is no published release"
+			continue
+		fi
+		if [ "${#tags[@]}" -ge $((4 * keep)) ]; then
+			warn "$name: the update metadata lists more than $((4 * keep)) releases; $tag and older are not kept"
+			break
+		fi
+		if take "$name" "$repo" "$tag"; then
+			tags+=("$tag")
+		else
+			warn "$name: $tag is listed in the update metadata but failed the checks"
+		fi
+	done < <(printf '%s\n' "${listed[@]}" | sort -urV)
+
+	# Releases the store holds that are no longer among the kept ones.
+	while read -r have; do
+		[ -n "$have" ] || continue
+		if [ "${#tags[@]}" -eq 0 ]; then
+			warn "$name: no release could be kept; the stored ones stay"
+			break
+		fi
+		printf '%s\n' "${tags[@]}" | grep -qxF "$have" && continue
+		store_rm "$name" "$have"
+		echo "$name $have: removed"
+	done < <(store_dirs "$name")
+
 done
 echo "sync: ${#lines[@]} projects"

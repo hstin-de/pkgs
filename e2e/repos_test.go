@@ -259,7 +259,10 @@ gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; 
 		must(t, os.WriteFile(filepath.Join(rel.dir, "page.html"), []byte("<script>alert(1)</script>"), 0o644))
 	}
 	gh := fakeGitHub(t, rels, map[string]string{
-		"stable.json": `{"v":"0.8.0"}`, "stable.json.sig": "sig", "keys.json": `{"k":1}`, "keys.json.sig": "sig",
+		// The manifest lists v0.6.0 (kept beyond KEEP below) and v0.5.0, which
+		// is no published release.
+		"stable.json":     `{"channel":"stable","releases":[{"version":"0.5.0"},{"version":"0.6.0"},{"version":"0.8.0"}]}`,
+		"stable.json.sig": "sig", "keys.json": `{"k":1}`, "keys.json.sig": "sig",
 	})
 
 	tools := func(env []string, cmd ...string) (string, error) {
@@ -467,16 +470,20 @@ rpm -q --qf 'pinned %{VERSION}\n' otterlink`)
 		}
 	})
 
-	// Pruning: with KEEP=2 the oldest otterlink release leaves the store.
-	out = sync("KEEP=2")
-	if !strings.Contains(out, "otterlink v0.6.0: removed") {
+	// Pruning: with KEEP=1 the newest release stays, and v0.6.0 because the
+	// update manifest lists it; v0.7.3 leaves the store.
+	out = sync("KEEP=1")
+	if !strings.Contains(out, "otterlink v0.7.3: removed") || strings.Contains(out, "otterlink v0.6.0: removed") {
 		t.Errorf("prune:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(work, "store", "otterlink", "v0.6.0")); err == nil {
-		t.Error("v0.6.0 is still stored")
+	if !strings.Contains(out, "otterlink: the update metadata lists v0.5.0, which is no published release") {
+		t.Errorf("no warning for v0.5.0:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(work, "store", "otterlink", "v0.7.3", "SHA256SUMS")); err != nil {
-		t.Error("v0.7.3 was removed")
+	for tag, kept := range map[string]bool{"v0.6.0": true, "v0.7.3": false, "v0.8.0": true} {
+		_, err := os.Stat(filepath.Join(work, "store", "otterlink", tag, "SHA256SUMS"))
+		if (err == nil) != kept {
+			t.Errorf("%s stored: %v, want %v", tag, err == nil, kept)
+		}
 	}
 	// Releases that fail the checks do not push good ones out.
 	if _, err := os.Stat(filepath.Join(work, "store", "sample", "v1.0.0", "SHA256SUMS")); err != nil {

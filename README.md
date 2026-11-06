@@ -34,7 +34,8 @@ Repository key fingerprint: `80C8 669E 42C7 7861 41EC  3004 251D 027B D7EE CC86`
     not stored yet it checks each asset against the SHA-256 digest GitHub recorded and requires every deb and rpm to
     be named `NAME` or `NAME-*` (so no project can ship `hstin-repo` or another project's package). It signs the rpms
     with the repository key and uploads everything to R2, with `SHA256SUMS` last. A release failing a check stays out,
-    with a warning. The newest 8 good releases per project are kept; older ones are removed.
+    with a warning. The newest 8 good releases per project are kept, and every release its update manifests still
+    list (updates download from here; up to 32 in all); older ones are removed.
   - `scripts/build.sh` builds the apt and dnf metadata, checks every package against the release's `SHA256SUMS`, and
     signs the metadata. It also builds `hstin-repo`, the pages and the install script.
   - A second job deploys to **Cloudflare Pages** with wrangler from `package-lock.json`. That job never sees the
