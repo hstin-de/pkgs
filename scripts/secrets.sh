@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# The two keys of pkgs.hstin.de that are made, not copied from a dashboard
-# (README.md, "Setup"). Nothing is written into the repository.
+# Setup helpers of pkgs.hstin.de (README.md, "Setup"). Nothing is written
+# into the repository.
 #
-#   repo-gpg          makes the OpenPGP key of the apt and dnf repositories in
-#                     $HSTIN_PKGS_SECRETS (default ~/hstin-pkgs-secrets):
-#                     REPO_GPG_KEY (private: back it up, then a GitHub secret)
-#                     and hstin.asc (public)
-#   deploy-key REPO   makes a key with which REPO (e.g. otterlink) pushes into
-#                     this repository (publish.yml): its public half becomes a
-#                     deploy key here, its private half the secret
-#                     PKGS_DEPLOY_KEY of REPO; it is kept nowhere else
+#   repo-gpg      makes the OpenPGP key of the apt and dnf repositories in
+#                 $HSTIN_PKGS_SECRETS (default ~/hstin-pkgs-secrets; better a
+#                 directory in /dev/shm, so it never touches the disk):
+#                 REPO_GPG_KEY (private: into the password manager, then the
+#                 GitHub secret), hstin-repo-revocation.asc (into the password
+#                 manager too) and hstin.asc (public)
+#   environment   creates the environment "production" of hstin-de/pkgs that
+#                 only main reaches; the deploy's secrets go there
 set -euo pipefail
 umask 077
 
@@ -38,25 +38,26 @@ repo_gpg() {
 	put REPO_GPG_KEY "$(GNUPGHOME=$home gpg --batch --armor --export-secret-keys "$fpr")"
 	GNUPGHOME=$home gpg --batch --armor --export "$fpr" > "$dir/hstin.asc"
 	chmod 644 "$dir/hstin.asc"
+	cp "$home/openpgp-revocs.d/$fpr.rev" "$dir/hstin-repo-revocation.asc"
 	rm -rf "$home"
 	cat << EOF
 Public half: $dir/hstin.asc (the site publishes it as /keys/hstin.asc).
+Revocation certificate: $dir/hstin-repo-revocation.asc (only if the key leaks).
 Back up $dir/REPO_GPG_KEY: apt and dnf trust only this key. A new key can
 arrive as an update of hstin-repo only while this one still signs; if it is
 lost, every machine must install hstin-repo again by hand.
 EOF
 }
 
-deploy_key() {
+environment() {
 	need gh "https://cli.github.com"
-	need ssh-keygen
-	local repo="${1:?usage: $0 deploy-key REPO}" k
-	k=$(mktemp -d)/key
-	ssh-keygen -q -t ed25519 -N '' -C "publish from $org/$repo" -f "$k"
-	gh repo deploy-key add "$k.pub" --repo "$org/pkgs" --allow-write --title "publish from $repo"
-	gh secret set PKGS_DEPLOY_KEY --repo "$org/$repo" < "$k"
-	rm -rf "$(dirname "$k")"
-	echo "$org/$repo may now push into $org/pkgs (secret PKGS_DEPLOY_KEY)."
+	gh api -X PUT "repos/$org/pkgs/environments/production" --input - > /dev/null << 'JSON'
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+JSON
+	if ! gh api "repos/$org/pkgs/environments/production/deployment-branch-policies" -q '.branch_policies[].name' | grep -qx main; then
+		gh api -X POST "repos/$org/pkgs/environments/production/deployment-branch-policies" -f name=main -f type=branch > /dev/null
+	fi
+	echo "$org/pkgs: environment production (branch main only)."
 }
 
 mkdir -p "$dir"
@@ -65,6 +66,6 @@ cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
 repo-gpg) repo_gpg ;;
-deploy-key) deploy_key "$@" ;;
+environment) environment ;;
 *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" && exit 2 ;;
 esac

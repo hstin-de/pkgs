@@ -5,6 +5,16 @@
 
 const segment = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
+// Release files are never shown as pages of pkgs.hstin.de, whatever they
+// are: text as text, everything else as a download, nothing runs.
+function security(headers, name) {
+  const text = name === "SHA256SUMS" || name.endsWith(".txt");
+  headers.set("content-type", text ? "text/plain; charset=utf-8" : "application/octet-stream");
+  if (!text) headers.set("content-disposition", `attachment; filename="${name}"`);
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("content-security-policy", "sandbox; default-src 'none'");
+}
+
 /**
  * @param {Request} request
  * @param {R2Bucket} bucket
@@ -19,26 +29,38 @@ export async function serve(request, bucket, parts) {
     return new Response("not found\n", { status: 404 });
   }
   const key = path.join("/");
-  const obj =
-    request.method === "HEAD"
-      ? await bucket.head(key)
-      : await bucket.get(key, { onlyIf: request.headers, range: request.headers });
+  let obj;
+  try {
+    obj =
+      request.method === "HEAD"
+        ? await bucket.head(key)
+        : await bucket.get(key, { onlyIf: request.headers, range: request.headers });
+  } catch {
+    // R2 rejects ranges it cannot satisfy.
+    return request.headers.has("range")
+      ? new Response("range not satisfiable\n", { status: 416 })
+      : new Response("error\n", { status: 500 });
+  }
   if (obj === null) {
     return new Response("not found\n", { status: 404 });
   }
   const headers = new Headers();
-  obj.writeHttpMetadata(headers);
+  security(headers, path[2]);
   headers.set("etag", obj.httpEtag);
   headers.set("accept-ranges", "bytes");
   // A release's files never change.
   headers.set("cache-control", "public, max-age=31536000, immutable");
   if (request.method === "HEAD") {
+    if (request.headers.get("if-none-match") === obj.httpEtag) {
+      return new Response(null, { status: 304, headers });
+    }
     headers.set("content-length", String(obj.size));
     return new Response(null, { headers });
   }
   if (!("body" in obj) || obj.body === undefined) {
     // A precondition failed.
     const conditional = request.headers.has("if-none-match") || request.headers.has("if-modified-since");
+    if (!conditional) headers.set("cache-control", "no-store");
     return new Response(null, { status: conditional ? 304 : 412, headers });
   }
   const r = obj.range;

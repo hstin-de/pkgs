@@ -1,20 +1,28 @@
 name: deploy
 
-# Builds pkgs.hstin.de (scripts/build.sh) and deploys it to Cloudflare Pages
-# with its functions (the release files from R2) whenever a project published
-# (publish.yml commits into projects/) or the site changed.
+# Builds pkgs.hstin.de and deploys it to Cloudflare Pages with its functions:
+# when the site changed, and when a project asks for it after a release or new
+# update metadata (workflow_dispatch through its trigger app). scripts/sync.sh
+# brings the projects' GitHub releases into R2 (checked, rpms signed), then
+# scripts/build.sh builds and signs the repositories.
+#
+# The secrets are in the environment "production", which only main reaches
+# (scripts/secrets.sh environment). The repository key is in the build job
+# only; wrangler (with its npm dependencies) runs in the deploy job, which
+# never sees it.
 on:
   push:
     branches: [main]
     paths:
       - projects.txt
-      - projects/**
-      - scripts/build.sh
+      - scripts/**
       - site/**
       - repo/**
       - functions/**
       - src/**
       - wrangler.toml
+      - package.json
+      - package-lock.json
       - .github/workflows/deploy.yml
   workflow_dispatch:
 
@@ -25,45 +33,88 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
+env:
+  PKGS: https://pkgs.hstin.de
+  NFPM_VERSION: 2.48.0
+  NFPM_SHA256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-24.04
-    env:
-      PKGS: https://pkgs.hstin.de
+    environment: production
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends apt-utils createrepo-c rpm
-          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz | sudo tar -xz -C /usr/local/bin nfpm
-      - uses: actions/cache@v6
+          curl -fsSL -o "$RUNNER_TEMP/nfpm.tar.gz" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "$NFPM_SHA256  $RUNNER_TEMP/nfpm.tar.gz" | sha256sum -c --quiet
+          sudo tar -xzf "$RUNNER_TEMP/nfpm.tar.gz" -C /usr/local/bin nfpm
+      - id: projects
+        name: Repositories of the projects
+        run: echo "repos=$(grep -Ev '^[[:space:]]*(#|$)' projects.txt | awk '{print $2}' | cut -d/ -f2 | paste -sd, -)" >> "$GITHUB_OUTPUT"
+      # Read access to the projects' repositories (contents: releases and the
+      # branch pkgs), for this job only.
+      - id: reader
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          path: ~/.cache/hstin-pkgs
-          key: hstin-pkgs-${{ github.run_id }}
-          restore-keys: hstin-pkgs-
-      - name: Site
+          client-id: ${{ secrets.READER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.READER_APP_KEY }}
+          owner: hstin-de
+          repositories: ${{ steps.projects.outputs.repos }}
+          permission-contents: read
+      - name: Sync and build
         env:
+          GH_TOKEN: ${{ steps.reader.outputs.token }}
           REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STORE: s3://hstin-pkgs
         run: |
           GNUPGHOME=$(mktemp -d)
           export GNUPGHOME
-          echo "$REPO_GPG_KEY" | gpg --batch --import
-          REPO_KEY=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr/ {print $10; exit}') scripts/build.sh out
-      - uses: cloudflare/wrangler-action@v4
+          trap 'gpgconf --kill gpg-agent; rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$REPO_GPG_KEY" | gpg --batch --import
+          REPO_KEY=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr/ {print $10; exit}')
+          export REPO_KEY
+          scripts/sync.sh "$RUNNER_TEMP/state"
+          ROOT="$RUNNER_TEMP/state" scripts/build.sh out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.158.0"
-          # wrangler.toml: the project, the output directory and the R2 binding.
-          command: pages deploy --branch=main --commit-dirty=true
-      - name: Check the published site
+          name: site
+          path: out
+          include-hidden-files: true
+          retention-days: 3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: out
+      - name: wrangler (package-lock.json)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx --no-install wrangler pages deploy out --project-name hstin-pkgs --branch main --commit-dirty=true
+      - name: Check
         run: |
-          for _ in 1 2 3 4 5 6; do
-            scripts/check.sh "$PKGS" && exit 0
+          for i in 1 2 3 4 5 6; do
+            scripts/check.sh "$PKGS" out && exit 0
             sleep 10
           done
           exit 1

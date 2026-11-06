@@ -1,9 +1,8 @@
-# Projects on pkgs.hstin.de, one name per line. All their packages are in the
-# one apt and dnf repository; a name is the project's download page (NAME/),
-# its signed update metadata (NAME/updates/, if it publishes any) and its
-# place in the R2 bucket.
-#
-# Projects publish with .github/workflows/publish.yml: their release files go
-# to the R2 bucket as NAME/<tag>/ (served at /dl/NAME/<tag>/), the file lists to
-# projects/NAME/releases/<tag>.txt and update metadata to projects/NAME/updates/.
-otterlink
+# Projects on pkgs.hstin.de: "NAME OWNER/REPO" per line. pkgs fetches the
+# repository's published releases (scripts/sync.sh, with the reader app, which
+# must be installed on it) and its signed update metadata (branch pkgs,
+# directory updates/). A project may only publish the packages NAME and
+# NAME-*; NAME is its download page (NAME/), its update metadata
+# (NAME/updates/) and its place in the R2 bucket (NAME/<tag>/, served at
+# /dl/NAME/<tag>/).
+otterlink hstin-de/otterlink

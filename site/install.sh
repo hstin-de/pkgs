@@ -4,7 +4,7 @@
 # then installs the packages given, if any. Afterwards: apt install PACKAGE,
 # or dnf install PACKAGE.
 #
-#   curl -fsSLO @BASE@/install.sh && less install.sh && sudo sh install.sh [PACKAGE…]
+#   cd "$(mktemp -d)" && curl -fsSLO @BASE@/install.sh && less install.sh && sudo sh install.sh [PACKAGE…]
 #
 # Everything runs from main, called on the last line: a broken download runs
 # nothing.
@@ -48,8 +48,18 @@ main() {
 	echo "The hstin repository is set up${1:+, installed: $*}. More with: $cmd PACKAGE"
 }
 
+# fetch URL FILE: HTTPS only (redirects included) when the URL is HTTPS.
 fetch() {
-	if command -v curl > /dev/null; then curl -fsSL "$1" -o "$2"; else wget -qO "$2" "$1"; fi
+	case "$1" in
+	https://*)
+		if command -v curl > /dev/null; then
+			curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
+		else
+			wget -q --https-only -O "$2" "$1"
+		fi
+		;;
+	*) if command -v curl > /dev/null; then curl -fsSL "$1" -o "$2"; else wget -qO "$2" "$1"; fi ;;
+	esac
 }
 
 main "$@"

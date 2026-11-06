@@ -1,0 +1,5 @@
+# Packages from the hstin repository never take the place of the
+# distribution's: a package of the same name stays the distribution's.
+Package: *
+Pin: origin "@HOST@"
+Pin-Priority: 100

@@ -1,8 +1,8 @@
 name: test
 
-# The function serving R2 (bun test), the site generator, publish script and
-# functions against wrangler pages dev and real apt and dnf in containers
-# (e2e/), and shellcheck.
+# The function serving R2 (bun test), sync.sh against a fake GitHub API, the
+# site generator and functions against wrangler pages dev and real apt and dnf
+# in containers (e2e/), and shellcheck. Pull requests get no secrets.
 on:
   push:
     branches: [main]
@@ -15,6 +15,9 @@ on:
       - src/**
       - wrangler.toml
       - go.mod
+      - projects.txt
+      - package.json
+      - package-lock.json
       - .github/workflows/test.yml
   pull_request:
     paths: *paths
@@ -27,11 +30,13 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: shellcheck scripts/*.sh site/install.sh
       - run: bun test src/
       - run: go test -count=1 -v ./e2e/

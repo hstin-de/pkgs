@@ -1,0 +1,8 @@
+{
+  "name": "hstin-pkgs",
+  "private": true,
+  "description": "Tools of pkgs.hstin.de: wrangler for the deploy and the end-to-end test, installed from package-lock.json (npm ci).",
+  "devDependencies": {
+    "wrangler": "4.158.0"
+  }
+}

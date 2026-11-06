@@ -1,13 +1,17 @@
-// Package e2e checks pkgs.hstin.de end to end: signed test packages of two
-// projects are published (scripts/publish.sh, dry run) into a local R2
-// bucket, the site is built (scripts/build.sh) and served by `wrangler pages
-// dev` with its functions and the bucket, and hstin-repo, the install script,
-// apt and dnf install from it in Debian and Fedora containers.
+// Package e2e checks pkgs.hstin.de end to end: test releases of two projects
+// on a fake GitHub API go through scripts/sync.sh (digests, package names, rpm
+// signing) into a local store, the site is built (scripts/build.sh) and served
+// by `wrangler pages dev` with its functions and the store as the R2 bucket,
+// and hstin-repo, the install script, apt and dnf install from it in Debian
+// and Fedora containers.
 //
 //	go test -count=1 -v ./e2e/
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,12 +29,14 @@ const toolsImage = "hstin-pkgs-tools"
 
 const toolsDockerfile = `FROM goreleaser/nfpm:latest AS nfpm
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends apt-utils createrepo-c rpm gnupg ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends apt-utils createrepo-c rpm gnupg ca-certificates curl jq && rm -rf /var/lib/apt/lists/*
 COPY --from=nfpm /usr/bin/nfpm /usr/bin/nfpm
 `
 
-// wranglerImage runs wrangler (node and the npm cache in the test directory).
+// wranglerImage runs wrangler, installed from package-lock.json.
 const wranglerImage = "node:22"
+
+const token = "test-token"
 
 func repoRoot() string {
 	_, file, _, _ := runtime.Caller(0)
@@ -69,8 +76,8 @@ func serve(t *testing.T, h http.Handler) string {
 	return "http://" + l.Addr().String()
 }
 
-func nfpmConfig(name, arch, v, key string) string {
-	c := "name: " + name + "\narch: " + arch + "\nplatform: linux\nversion: " + v + `
+func nfpmConfig(name, arch, v string) string {
+	return "name: " + name + "\narch: " + arch + "\nplatform: linux\nversion: " + v + `
 maintainer: test <test@example.com>
 description: test package
 license: Apache-2.0
@@ -79,16 +86,111 @@ contents:
     dst: /usr/bin/` + name + `
     file_info: {mode: 0755}
 `
-	if key != "" {
-		c += "rpm:\n  signature:\n    key_file: " + key + "\n"
-	}
-	return c
 }
 
+// A release on the fake GitHub.
 type release struct {
-	project, version string
-	packages         []string
-	signed           bool
+	repo, tag  string
+	packages   []string
+	draft, pre bool
+	badDigest  bool // one asset's recorded digest is wrong
+	dir        string
+}
+
+// fakeGitHub serves the parts of the GitHub API sync.sh uses: releases,
+// their assets (with digests) and the contents of the branch pkgs.
+func fakeGitHub(t *testing.T, rels []*release, updates map[string]string) string {
+	var base string
+	mux := http.NewServeMux()
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+				return
+			}
+			h(w, r)
+		}
+	}
+	type asset struct {
+		Name   string `json:"name"`
+		URL    string `json:"url"`
+		Digest string `json:"digest"`
+	}
+	type ghRelease struct {
+		Tag        string  `json:"tag_name"`
+		Draft      bool    `json:"draft"`
+		Prerelease bool    `json:"prerelease"`
+		Assets     []asset `json:"assets"`
+	}
+	view := func(rel *release) ghRelease {
+		g := ghRelease{Tag: rel.tag, Draft: rel.draft, Prerelease: rel.pre}
+		entries, _ := os.ReadDir(rel.dir)
+		for i, e := range entries {
+			b, _ := os.ReadFile(filepath.Join(rel.dir, e.Name()))
+			sum := sha256.Sum256(b)
+			if rel.badDigest && i == 0 {
+				sum[0] ^= 1
+			}
+			g.Assets = append(g.Assets, asset{e.Name(), base + "/assets/" + rel.repo + "/" + rel.tag + "/" + e.Name(), "sha256:" + hex.EncodeToString(sum[:])})
+		}
+		return g
+	}
+	mux.HandleFunc("GET /repos/{owner}/{repo}/releases", auth(func(w http.ResponseWriter, r *http.Request) {
+		list := []ghRelease{}
+		for i := len(rels) - 1; i >= 0; i-- {
+			if rels[i].repo == r.PathValue("owner")+"/"+r.PathValue("repo") {
+				list = append(list, view(rels[i]))
+			}
+		}
+		_ = json.NewEncoder(w).Encode(list)
+	}))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/releases/tags/{tag}", auth(func(w http.ResponseWriter, r *http.Request) {
+		for _, rel := range rels {
+			if rel.repo == r.PathValue("owner")+"/"+r.PathValue("repo") && rel.tag == r.PathValue("tag") {
+				_ = json.NewEncoder(w).Encode(view(rel))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	mux.HandleFunc("GET /assets/{owner}/{repo}/{tag}/{name}", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "application/octet-stream" {
+			http.Error(w, "json", http.StatusNotAcceptable)
+			return
+		}
+		for _, rel := range rels {
+			if rel.repo == r.PathValue("owner")+"/"+r.PathValue("repo") && rel.tag == r.PathValue("tag") {
+				http.ServeFile(w, r, filepath.Join(rel.dir, filepath.Base(r.PathValue("name"))))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	mux.HandleFunc("GET /repos/hstin-de/otterlink/contents/updates", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ref") != "pkgs" {
+			http.NotFound(w, r)
+			return
+		}
+		type entry struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		}
+		list := []entry{{"README.md", "file"}}
+		for n := range updates {
+			list = append(list, entry{n, "file"})
+		}
+		_ = json.NewEncoder(w).Encode(list)
+	}))
+	mux.HandleFunc("GET /repos/hstin-de/otterlink/contents/updates/{name}", auth(func(w http.ResponseWriter, r *http.Request) {
+		b, ok := updates[r.PathValue("name")]
+		if !ok || r.URL.Query().Get("ref") != "pkgs" || r.Header.Get("Accept") != "application/vnd.github.raw" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(b))
+	}))
+	base = serve(t, mux)
+	return base
 }
 
 func TestRepositories(t *testing.T) {
@@ -108,135 +210,173 @@ func TestRepositories(t *testing.T) {
 	docker(t, "run", "--rm", "--user", user(), "-e", "HOME=/work", "-v", work+":/work", toolsImage, "sh", "-c", `set -e
 export GNUPGHOME=/work/gnupg; mkdir -p -m 700 $GNUPGHOME
 gpg --batch --passphrase '' --quick-gen-key 'hstin test <test@example.com>' ed25519 sign never 2>/dev/null
-gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; exit}' > /work/fpr
-gpg --batch --armor --export-secret-keys > /work/key.asc`)
-	fpr, err := os.ReadFile(filepath.Join(work, "fpr"))
+gpg --batch --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr/ {print $10; exit}' > /work/fpr`)
+	fprb, err := os.ReadFile(filepath.Join(work, "fpr"))
 	must(t, err)
+	fpr := strings.TrimSpace(string(fprb))
 
-	// A copy of this repository with the test's projects: publish.sh (dry
-	// run: no R2, no push) records the releases there; the files go into the
-	// local bucket below.
+	// A copy of this repository with the test's projects.
 	src := filepath.Join(work, "src")
 	must(t, os.MkdirAll(src, 0o777))
-	for _, d := range []string{"scripts", "site", "repo", "functions", "src", "wrangler.toml"} {
+	for _, d := range []string{"scripts", "site", "repo", "functions", "src", "wrangler.toml", "package.json", "package-lock.json"} {
 		if out, err := exec.Command("cp", "-r", filepath.Join(root, d), src).CombinedOutput(); err != nil {
 			t.Fatalf("cp: %v %s", err, out)
 		}
 	}
-	must(t, os.WriteFile(filepath.Join(src, "projects.txt"), []byte("# test\notterlink\nsample\n"), 0o644))
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", src, "-c", "user.name=t", "-c", "user.email=t@e"}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v %s", args, err, out)
-		}
-	}
-	git("init", "-q", "-b", "main")
-	git("add", "-A")
-	git("commit", "-qm", "test")
-	publish := func(env []string, args ...string) string {
-		t.Helper()
-		cmd := exec.Command(filepath.Join(src, "scripts", "publish.sh"), args...)
-		cmd.Env = append(os.Environ(), append([]string{"DRY_RUN=1"}, env...)...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("publish.sh %v: %v\n%s", args, err, out)
-		}
-		return string(out)
-	}
+	must(t, os.WriteFile(filepath.Join(src, "projects.txt"), []byte("# test\notterlink hstin-de/otterlink\nsample hstin-de/sample\n"), 0o644))
 
-	// Two projects in one repository: otterlink with two packages over
-	// three releases (the oldest rpm unsigned) and update metadata, sample
-	// with one and none.
+	// The releases: otterlink with two packages over three releases (rpms
+	// unsigned: pkgs signs them), a prerelease and a draft that stay out;
+	// sample with a good release, one that carries a package of another name
+	// and one whose digest does not match.
 	ot := []string{"otterlink", "otterlink-server"}
-	for _, rel := range []release{
-		{"otterlink", "0.6.0", ot, false}, {"otterlink", "0.7.3", ot, true}, {"otterlink", "0.8.0", ot, true},
-		{"sample", "1.0.0", []string{"hstin-sample"}, true},
-	} {
-		in := filepath.Join(work, "in", rel.project, "v"+rel.version)
-		must(t, os.MkdirAll(filepath.Join(in, "files"), 0o777))
-		key := "/work/key.asc"
-		if !rel.signed {
-			key = ""
-		}
+	rels := []*release{
+		{repo: "hstin-de/otterlink", tag: "v0.6.0", packages: ot},
+		{repo: "hstin-de/otterlink", tag: "v0.7.3", packages: ot},
+		{repo: "hstin-de/sample", tag: "v1.0.0", packages: []string{"sample"}},
+		{repo: "hstin-de/otterlink", tag: "v0.8.0", packages: ot},
+		{repo: "hstin-de/otterlink", tag: "v0.9.0-rc.1", packages: ot, pre: true},
+		{repo: "hstin-de/otterlink", tag: "v1.0.0", packages: ot, draft: true},
+		{repo: "hstin-de/sample", tag: "v1.1.0", packages: []string{"sample", "otterlink"}},
+		{repo: "hstin-de/sample", tag: "v1.2.0", packages: []string{"sample"}, badDigest: true},
+	}
+	for _, rel := range rels {
+		v := strings.TrimPrefix(rel.tag, "v")
+		rel.dir = filepath.Join(work, "gh", rel.repo, rel.tag)
+		must(t, os.MkdirAll(rel.dir, 0o777))
 		for _, name := range rel.packages {
 			for _, arch := range []string{"amd64", "arm64"} {
 				for _, format := range []string{"deb", "rpm"} {
-					base := name + "_" + rel.version + "_linux_" + arch
-					must(t, os.WriteFile(filepath.Join(work, base+".yaml"), []byte(nfpmConfig(name, arch, rel.version, key)), 0o644))
+					base := name + "_" + v + "_linux_" + arch
+					must(t, os.WriteFile(filepath.Join(work, base+".yaml"), []byte(nfpmConfig(name, arch, v)), 0o644))
 					docker(t, "run", "--rm", "--user", user(), "-v", work+":/work", "-w", "/work", "goreleaser/nfpm:latest",
 						"package", "-f", "/work/"+base+".yaml", "-p", format,
-						"-t", "/work/in/"+rel.project+"/v"+rel.version+"/files/"+base+"."+format)
+						"-t", "/work/gh/"+rel.repo+"/"+rel.tag+"/"+base+"."+format)
 				}
 			}
 		}
-		must(t, os.WriteFile(filepath.Join(in, "files", "notes.txt"), []byte("release notes "+rel.version), 0o644))
-		if rel.project == "otterlink" {
-			must(t, os.MkdirAll(filepath.Join(in, "updates"), 0o777))
-			for _, n := range []string{"stable.json", "stable.json.sig", "keys.json", "keys.json.sig"} {
-				must(t, os.WriteFile(filepath.Join(in, "updates", n), []byte(`{"v":"`+rel.version+`"}`), 0o644))
-			}
-		}
-		out := publish(nil, rel.project, "v"+rel.version, in)
-		if !strings.Contains(out, "dry run: aws s3 cp "+in+"/files/ s3://hstin-pkgs/"+rel.project+"/v"+rel.version+"/") {
-			t.Errorf("publish.sh did not upload:\n%s", out)
-		}
-		dl := filepath.Join(work, "dl", rel.project, "v"+rel.version)
-		must(t, os.MkdirAll(filepath.Dir(dl), 0o777))
-		must(t, os.Rename(filepath.Join(in, "files"), dl))
+		must(t, os.WriteFile(filepath.Join(rel.dir, "notes.txt"), []byte("release notes "+v), 0o644))
+		must(t, os.WriteFile(filepath.Join(rel.dir, "page.html"), []byte("<script>alert(1)</script>"), 0o644))
 	}
-	if b, _ := os.ReadFile(filepath.Join(src, "projects", "otterlink", "updates", "stable.json")); !strings.Contains(string(b), "0.8.0") {
-		t.Errorf("update metadata not taken over: %s", b)
+	gh := fakeGitHub(t, rels, map[string]string{
+		"stable.json": `{"v":"0.8.0"}`, "stable.json.sig": "sig", "keys.json": `{"k":1}`, "keys.json.sig": "sig",
+	})
+
+	tools := func(env []string, cmd ...string) (string, error) {
+		args := []string{"run", "--rm", "--user", user(), "-e", "HOME=/work", "--network", "host", "-v", work + ":/work",
+			"-e", "GNUPGHOME=/work/gnupg", "-e", "REPO_KEY=" + fpr, "-e", "STORE=/work/store",
+			"-e", "GH_TOKEN=" + token, "-e", "GITHUB_API=" + gh}
+		for _, e := range env {
+			args = append(args, "-e", e)
+		}
+		out, err := exec.Command("docker", append(append(args, toolsImage), cmd...)...).CombinedOutput()
+		return string(out), err
+	}
+	sync := func(env ...string) string {
+		t.Helper()
+		out, err := tools(append([]string{"ROOT=/work/src"}, env...), "/work/src/scripts/sync.sh", "/work/state")
+		if err != nil {
+			t.Fatalf("sync.sh: %v\n%s", err, out)
+		}
+		return out
+	}
+	out := sync()
+	t.Logf("sync.sh:\n%s", out)
+	for _, want := range []string{
+		"otterlink v0.8.0: stored 10 files",
+		`sample v1.1.0: otterlink_1.1.0_linux_amd64.deb is the package "otterlink"; sample may only publish sample and sample-*`,
+		"sample v1.2.0: notes.txt does not match the digest GitHub recorded",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("sync.sh: missing %q", want)
+		}
+	}
+	for _, bad := range []string{"v0.9.0-rc.1", "otterlink v1.0.0", "sample v1.1.0: stored", "sample v1.2.0: stored"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("sync.sh took %q", bad)
+		}
+	}
+	for _, f := range []string{"otterlink/v0.6.0/SHA256SUMS", "otterlink/v0.8.0/otterlink_0.8.0_linux_amd64.rpm", "sample/v1.0.0/SHA256SUMS", "state/projects/otterlink/updates/stable.json.sig"} {
+		p := filepath.Join(work, "store", f)
+		if strings.HasPrefix(f, "state/") {
+			p = filepath.Join(work, f)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing %s", f)
+		}
+	}
+	for _, f := range []string{"store/sample/v1.1.0", "store/sample/v1.2.0", "state/projects/sample/updates", "state/projects/otterlink/updates/README.md"} {
+		if _, err := os.Stat(filepath.Join(work, f)); err == nil {
+			t.Errorf("must not exist: %s", f)
+		}
+	}
+	// The rpms in the store carry the repository key's signature.
+	if out, err := tools(nil, "sh", "-c", `set -e; gpg --batch --armor --export "$REPO_KEY" > /tmp/k.asc
+rpmkeys --dbpath /tmp/db --import /tmp/k.asc
+rpmkeys --dbpath /tmp/db --checksig /work/store/otterlink/v0.6.0/otterlink_0.6.0_linux_amd64.rpm`); err != nil || !strings.Contains(out, "signatures OK") {
+		t.Errorf("stored rpm not signed: %v\n%s", err, out)
+	}
+	// Again: nothing new to store.
+	if out := sync(); strings.Contains(out, "stored") {
+		t.Errorf("second sync stored again:\n%s", out)
 	}
 
-	// The site, built against the files (build.sh reads them over HTTP here,
-	// from R2 in the deploy).
+	// The site, from the state and the store.
 	port := freePort(t)
 	site := fmt.Sprintf("http://127.0.0.1:%d", port)
-	dlURL := serve(t, http.FileServer(http.Dir(filepath.Join(work, "dl"))))
-	out := docker(t, "run", "--rm", "--user", user(), "-e", "HOME=/work", "--network", "host", "-v", work+":/work",
-		"-e", "GNUPGHOME=/work/gnupg", "-e", "REPO_KEY="+strings.TrimSpace(string(fpr)), "-e", "ROOT=/work/src",
-		"-e", "DL_URL="+dlURL, "-e", "PKGS_URL="+site, "-e", "CACHE=/work/cache",
-		toolsImage, "/work/src/scripts/build.sh", "/work/src/out")
-	t.Logf("build.sh:\n%s", out)
-	if !strings.Contains(out, "otterlink otterlink_0.6.0_linux_amd64.rpm is not signed") {
-		t.Error("the unsigned rpm was not left out")
+	out, err = tools([]string{"ROOT=/work/state", "PKGS_URL=" + site}, "/work/src/scripts/build.sh", "/work/src/out")
+	if err != nil {
+		t.Fatalf("build.sh: %v\n%s", err, out)
 	}
+	t.Logf("build.sh:\n%s", out)
 	built := filepath.Join(src, "out")
-	for _, f := range []string{"apt/dists/stable/InRelease", "rpm/repodata/repomd.xml.asc", "rpm/hstin.repo", "hstin-repo.deb",
-		"hstin-repo.rpm", "otterlink/updates/stable.json.sig", "otterlink/index.html", "sample/index.html", "install.sh",
-		"keys/hstin.gpg", "index.html"} {
+	for _, f := range []string{"apt/dists/stable/InRelease", "rpm/repodata/repomd.xml.asc", "hstin-repo.deb",
+		"hstin-repo.rpm", "otterlink/updates/stable.json.sig", "otterlink/index.html", "otterlink/latest.txt", "sample/index.html",
+		"install.sh", "keys/hstin.gpg", "index.html"} {
 		if _, err := os.Stat(filepath.Join(built, f)); err != nil {
 			t.Errorf("site misses %s", f)
 		}
 	}
-	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "_redirects"} {
+	for _, f := range []string{"sample/updates", "apt/pool", "rpm/pool", "rpm/hstin.repo"} {
 		if _, err := os.Stat(filepath.Join(built, f)); err == nil {
 			t.Errorf("site must not have %s", f)
 		}
 	}
-	if b, _ := os.ReadFile(filepath.Join(built, "index.html")); !strings.Contains(string(b), strings.TrimSpace(string(fpr))) {
+	if b, _ := os.ReadFile(filepath.Join(built, "index.html")); !strings.Contains(string(b), fpr) {
 		t.Error("the start page does not show the key's fingerprint")
 	}
+	if out, err := tools([]string{"ROOT=/work/state"}, "/work/src/scripts/build.sh", "/work/src/site"); err == nil {
+		t.Errorf("build.sh accepted an output directory not named out:\n%s", out)
+	}
+	// A file in the store that no longer matches its SHA256SUMS stops the build.
+	tampered := filepath.Join(work, "store", "otterlink", "v0.7.3", "otterlink_0.7.3_linux_amd64.deb")
+	orig, err := os.ReadFile(tampered)
+	must(t, err)
+	must(t, os.WriteFile(tampered, append(slices.Clone(orig), 0), 0o644))
+	if out, err := tools([]string{"ROOT=/work/state"}, "/work/src/scripts/build.sh", "/work/tmp/out"); err == nil ||
+		!strings.Contains(out, "does not match its SHA256SUMS") {
+		t.Errorf("build.sh signed a tampered file: %v\n%s", err, out)
+	}
+	must(t, os.WriteFile(tampered, orig, 0o644))
 
-	// wrangler: the files into the local bucket (a Workers config beside
-	// the Pages one: wrangler's r2 commands refuse Pages projects), then
-	// pages dev with the functions and the bucket.
+	// wrangler (from package-lock.json): the store into the local bucket (a
+	// Workers config beside the Pages one: wrangler's r2 commands refuse Pages
+	// projects), then pages dev with the functions and the bucket.
 	seed := filepath.Join(work, "seed")
 	must(t, os.MkdirAll(seed, 0o777))
 	must(t, os.WriteFile(filepath.Join(seed, "wrangler.toml"), []byte(
 		"name = \"seed\"\ncompatibility_date = \"2026-11-01\"\n[[r2_buckets]]\nbinding = \"DL\"\nbucket_name = \"hstin-pkgs\"\n"), 0o644))
 	var puts []string
-	must(t, filepath.Walk(filepath.Join(work, "dl"), func(p string, info os.FileInfo, err error) error {
+	must(t, filepath.Walk(filepath.Join(work, "store"), func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
-		key, _ := filepath.Rel(filepath.Join(work, "dl"), p)
-		puts = append(puts, fmt.Sprintf("$w r2 object put 'hstin-pkgs/%s' --file '/work/dl/%s' --local --persist-to /work/wr > /dev/null", key, key))
+		key, _ := filepath.Rel(filepath.Join(work, "store"), p)
+		puts = append(puts, fmt.Sprintf("$w r2 object put 'hstin-pkgs/%s' --file '/work/store/%s' --local --persist-to /work/wr > /dev/null", key, key))
 		return nil
 	}))
-	script := "set -e\nmkdir -p /work/tool && cd /work/tool && npm install --silent --no-audit --no-fund wrangler@4 > /dev/null\n" +
-		"w=/work/tool/node_modules/.bin/wrangler\ncd /work/seed\n" + strings.Join(puts, "\n") +
+	script := "set -e\ncd /work/src && npm ci --silent --ignore-scripts --no-audit --no-fund > /dev/null\n" +
+		"w=/work/src/node_modules/.bin/wrangler\ncd /work/seed\n" + strings.Join(puts, "\n") +
 		fmt.Sprintf("\ncd /work/src\nexec $w pages dev --ip 127.0.0.1 --port %d --persist-to /work/wr\n", port)
 	name := fmt.Sprintf("hstin-pkgs-e2e-%d", port)
 	docker(t, "run", "-d", "--name", name, "--user", user(), "--network", "host", "-v", work+":/work",
@@ -273,18 +413,31 @@ gpg --batch --armor --export-secret-keys > /work/key.asc`)
 	if resp, err := http.Get(site + "/dl/otterlink/v0.8.0/missing.txt"); err != nil || resp.StatusCode != http.StatusNotFound {
 		t.Errorf("a missing file: %v %v", resp, err)
 	}
+	// A release's HTML file is a download, not a page of the site.
+	if resp, err := http.Get(site + "/dl/otterlink/v0.8.0/page.html"); err != nil {
+		t.Error(err)
+	} else {
+		resp.Body.Close()
+		if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" || resp.Header.Get("Content-Security-Policy") == "" {
+			t.Errorf("page.html served as %q", ct)
+		}
+	}
+	if out, err := exec.Command(filepath.Join(root, "scripts", "check.sh"), site, built).CombinedOutput(); err != nil {
+		t.Errorf("check.sh: %v\n%s", err, out)
+	}
 
 	t.Run("debian", func(t *testing.T) {
 		out := docker(t, "run", "--rm", "--network", "host", "-e", "BASE="+site, "debian:trixie-slim", "sh", "-c", `set -e
 apt-get update -qq && apt-get install -y -qq curl > /dev/null
-cd /tmp && curl -fsSLO $BASE/install.sh && sh install.sh otterlink
+cd "$(mktemp -d)" && curl -fsSLO $BASE/install.sh && sh install.sh otterlink
 dpkg-query -W -f='installed ${Version}\n' otterlink
 dpkg -L hstin-repo | grep -q /etc/apt/sources.list.d/hstin.sources && echo 'repo package'
+apt-cache policy otterlink | grep -q ' 100 ' && echo 'pinned at 100'
 apt-get install -y -qq --allow-downgrades otterlink=0.6.0 > /dev/null
 dpkg-query -W -f='downgraded ${Version}\n' otterlink
-apt-get install -y -qq otterlink otterlink-server hstin-sample > /dev/null
-dpkg-query -W -f='${Package} ${Version}\n' otterlink otterlink-server hstin-sample`)
-		for _, want := range []string{"installed 0.8.0", "repo package", "downgraded 0.6.0", "otterlink 0.8.0", "otterlink-server 0.8.0", "hstin-sample 1.0.0"} {
+apt-get install -y -qq otterlink otterlink-server sample > /dev/null
+dpkg-query -W -f='${Package} ${Version}\n' otterlink otterlink-server sample`)
+		for _, want := range []string{"installed 0.8.0", "repo package", "pinned at 100", "downgraded 0.6.0", "otterlink 0.8.0", "otterlink-server 0.8.0", "sample 1.0.0"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in:\n%s", want, out)
 			}
@@ -293,39 +446,41 @@ dpkg-query -W -f='${Package} ${Version}\n' otterlink otterlink-server hstin-samp
 	t.Run("debian package", func(t *testing.T) {
 		out := docker(t, "run", "--rm", "--network", "host", "-e", "BASE="+site, "debian:trixie-slim", "sh", "-c", `set -e
 apt-get update -qq && apt-get install -y -qq curl > /dev/null
-curl -fsSLo /tmp/hstin-repo.deb $BASE/hstin-repo.deb
-apt-get install -y -qq /tmp/hstin-repo.deb > /dev/null && apt-get update -qq
-apt-get install -y -qq hstin-sample > /dev/null
-dpkg-query -W -f='${Package} ${Version}\n' hstin-sample`)
-		if !strings.Contains(out, "hstin-sample 1.0.0") {
+cd "$(mktemp -d)" && curl -fsSLO $BASE/hstin-repo.deb && apt-get install -y -qq ./hstin-repo.deb > /dev/null && apt-get update -qq
+apt-get install -y -qq sample > /dev/null
+dpkg-query -W -f='${Package} ${Version}\n' sample`)
+		if !strings.Contains(out, "sample 1.0.0") {
 			t.Errorf("hstin-repo, then apt install:\n%s", out)
 		}
 	})
 	t.Run("fedora", func(t *testing.T) {
 		out := docker(t, "run", "--rm", "--network", "host", "-e", "BASE="+site, "fedora:42", "sh", "-c", `set -e
 dnf install -y -q $BASE/hstin-repo.rpm
-dnf install -y -q otterlink-server hstin-sample
-rpm -q --qf 'installed %{NAME} %{VERSION}\n' otterlink-server hstin-sample
-dnf install -y -q otterlink-0.7.3
-rpm -q --qf 'pinned %{VERSION}\n' otterlink
-if dnf install -y -q otterlink-0.6.0 2>/dev/null; then echo 'unsigned installed'; fi`)
-		for _, want := range []string{"installed otterlink-server 0.8.0", "installed hstin-sample 1.0.0", "pinned 0.7.3"} {
+dnf install -y -q otterlink-server sample
+rpm -q --qf 'installed %{NAME} %{VERSION}\n' otterlink-server sample
+dnf install -y -q otterlink-0.6.0
+rpm -q --qf 'pinned %{VERSION}\n' otterlink`)
+		for _, want := range []string{"installed otterlink-server 0.8.0", "installed sample 1.0.0", "pinned 0.6.0"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in:\n%s", want, out)
 			}
 		}
-		if strings.Contains(out, "unsigned installed") {
-			t.Error("dnf installed the unsigned 0.6.0")
-		}
 	})
 
-	// Pruning: with KEEP=2 the oldest release goes from R2 and the lists.
-	out = publish([]string{"KEEP=2"}, "otterlink", filepath.Join(work, "in", "otterlink", "v0.8.0"))
-	if !strings.Contains(out, "dry run: aws s3 rm s3://hstin-pkgs/otterlink/v0.6.0/ --recursive") || !strings.Contains(out, "removed otterlink v0.6.0") {
+	// Pruning: with KEEP=2 the oldest otterlink release leaves the store.
+	out = sync("KEEP=2")
+	if !strings.Contains(out, "otterlink v0.6.0: removed") {
 		t.Errorf("prune:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(src, "projects", "otterlink", "releases", "v0.6.0.txt")); err == nil {
-		t.Error("v0.6.0 is still listed")
+	if _, err := os.Stat(filepath.Join(work, "store", "otterlink", "v0.6.0")); err == nil {
+		t.Error("v0.6.0 is still stored")
+	}
+	if _, err := os.Stat(filepath.Join(work, "store", "otterlink", "v0.7.3", "SHA256SUMS")); err != nil {
+		t.Error("v0.7.3 was removed")
+	}
+	// Releases that fail the checks do not push good ones out.
+	if _, err := os.Stat(filepath.Join(work, "store", "sample", "v1.0.0", "SHA256SUMS")); err != nil {
+		t.Error("sample v1.0.0 was removed")
 	}
 }
 

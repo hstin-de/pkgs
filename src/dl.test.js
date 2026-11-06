@@ -83,6 +83,27 @@ describe("serve", () => {
   test("only GET and HEAD", async () => {
     expect((await serve(req("PUT"), b, path)).status).toBe(405);
   });
+  test("served as a download, never as a page", async () => {
+    const r = await serve(req(), b, path);
+    expect(r.headers.get("content-type")).toBe("application/octet-stream");
+    expect(r.headers.get("content-disposition")).toContain("attachment");
+    expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(r.headers.get("content-security-policy")).toContain("sandbox");
+  });
+  test("a failed precondition is not cached", async () => {
+    const strict = { ...b, get: async (key, opts) => ({ ...(await b.head(key)) }) };
+    const r = await serve(req("GET", { "if-match": '"x"' }), strict, path);
+    expect(r.status).toBe(412);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+  });
+  test("a range R2 rejects", async () => {
+    const broken = { ...b, get: async () => { throw new Error("InvalidRange"); } };
+    expect((await serve(req("GET", { range: "bytes=99-" }), broken, path)).status).toBe(416);
+  });
+  test("HEAD not modified", async () => {
+    const etag = (await serve(req("HEAD"), b, path)).headers.get("etag");
+    expect((await serve(req("HEAD", { "if-none-match": etag }), b, path)).status).toBe(304);
+  });
   test("a string path", async () => {
     expect((await serve(req(), b, path.join("/"))).status).toBe(200);
   });
